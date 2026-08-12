@@ -74,29 +74,10 @@ dropped the gross-up from 1.101x to 1.083x.
 
 ## Scheduling
 
-Routine `trig_012PJ6qGrvVKeJwu3D2LioXV` — "Antares pacing refresh — daily 7am PT",
-cron `0 14 * * *` (UTC), fresh session per fire. **Currently disabled**, see below.
-
-**Daylight saving.** Cron runs in UTC and does not follow DST. `0 14 * * *` is 07:00
-Pacific during PDT. When PST resumes (2026-11-01) it becomes 06:00 Pacific — change to
-`0 15 * * *` then, and back again in March.
-
-**Before enabling**, the fired session needs credentials it does not currently have.
-Trigger-fired sessions run **without MCP connector tools**, so the slash-command flow
-(Windsor MCP -> cache -> Slack MCP) cannot run there. Two ways to fix:
-
-1. *Headless / REST (recommended).* Set three environment secrets and the routine needs
-   no MCP at all:
-   - `WINDSOR_API_KEY` — `windsor_get` falls back to the Windsor REST API
-   - `SLACK_BOT_TOKEN` — `post_slack` uses `chat.postMessage` directly
-   - `GSHEET_SA_KEY_JSON` — the service-account key inline (no file on disk)
-
-   Then drop `WINDSOR_CACHE` and `SLACK_OUT` from the invocation; the same file runs
-   end to end unattended.
-
-2. *Recreate the Routine from the claude.ai Routines UI*, attaching the Windsor, Slack
-   and Google Drive connectors. The stored prompt already handles fetching the key
-   from Drive. Faster to set up, but depends on connector auth staying valid.
+**Nothing is scheduled yet.** See [ROUTINE.md](ROUTINE.md) — it has the settings, the
+paste-ready prompt, and why the Routine must be created from the claude.ai Routines UI
+rather than from a Claude session (session-created Routines carry no MCP connectors, so
+the Windsor pull and Slack post would both fail).
 
 ## Sheet changes made outside this repo
 
