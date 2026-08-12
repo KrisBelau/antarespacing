@@ -116,6 +116,21 @@ Both cells now read `SUM(U3:U47)/SUM(G3:G47)`, reusing the helper column that al
 applies the gross-up so the two paths cannot drift apart again. Blend went 1.15x ->
 1.27x, guardrail flipped to AT/ABOVE TARGET, queue counts unchanged (20 / 19 / 6).
 
+**2026-08-12 — Pacing Curve projection referenced the wrong cell.** All 31 formulas in
+`Pacing Curve` column E extrapolated `'Pacing Tracker'!$E$55`, which is
+`SUMIFS(F,L,"Cut or Fix")` — $1,817/day of cut-candidate spend. The intended source is
+`$E$58`, `SUM(E3:E47)` = total MTD spend, three rows down. The projection line therefore
+read $4,695 at day 31 instead of ~$156k, making the chart's whole projected trajectory
+meaningless.
+
+All 31 cells now reference `$E$58`. Projection runs from today's actual to $156,425 at
+month end against the $140,000 guardrail — 12% over, which is the point of the line.
+
+Note the projection anchors on `E58` (campaign-level sum, $60,551) while Actual
+Cumulative comes from the date-level daily series ($61,181), so the two differ by ~1%
+where they meet at today. That is the known aggregation gap documented under Known gaps,
+not a further error.
+
 ## Known gaps
 
 - **Campaigns are matched by exact name.** Rename a campaign on-platform and its row
