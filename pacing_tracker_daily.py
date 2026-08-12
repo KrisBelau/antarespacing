@@ -12,10 +12,11 @@ What this routine does each morning:
        - facebook     (Antares Ads)            conv field: action_values_omni_purchase
   2. Pull the trailing-30d DAILY spend series (Google) to compute the SPEND-WEIGHTED
      conversion-lag gross-up multiplier from the maturation curve in the sheet.
-  3. Write per-campaign raw data into the Pacing Tracker tab (cols C,F,G,H). The sheet's
+  3. Write per-campaign raw data into the Pacing Tracker tab (cols E,F,G,H). The sheet's
      own formulas recompute lag-adjusted ROAS, iROAS, bands, suggested budgets, headline.
   4. Write the spend-weighted multiplier into Config so lag adjustment stays current.
-  5. Snapshot today's cumulative spend into Pacing Curve.
+  5. Rewrite the whole month-to-date cumulative spend series in Pacing Curve, so the
+     column self-heals after a missed run or a platform restatement.
   6. (Optional) If a fresh Google "Time Lag" CSV export is dropped in TIMELAG_DIR,
      re-derive the maturation curve and overwrite the curve cells in Config.
   7. Post a Slack digest: actual blended iROAS vs floor, guardrail status, potential upside,
@@ -41,7 +42,7 @@ from google.oauth2.service_account import Credentials
 # ---------------------------------------------------------------- CONFIG
 SHEET_ID        = os.environ.get("PACING_SHEET_ID", "REPLACE_WITH_SHEET_ID")
 SA_KEYFILE      = os.environ["GSHEET_SA_KEYFILE"]
-SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#autotune-pacing")
+SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#antares-pacing")
 TIMELAG_DIR     = os.environ.get("TIMELAG_DIR", "/tmp/timelag")   # drop new exports here
 DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", "yes")
 
@@ -52,7 +53,7 @@ META_ACCOUNT = "Antares Ads"
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
 
-# Column map on Pacing Tracker (1-indexed). Routine writes only C(mtd), F(daily, Meta only), G(l30sp), H(l30cv).
+# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily, Meta only), G(l30sp), H(l30cv).
 COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
          l30roas=9,iroas=10,ivsf=11,band=12,sugg=13,dbud=14,exp=15,pace=16,proj=17,
          action=18,grace=19,notes=20)
@@ -62,12 +63,12 @@ TODAY = dt.date.today()
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None):
     """
-    Stable name for one Windsor pull. The seven calls this routine makes are fully
+    Stable name for one Windsor pull. The nine calls this routine makes are fully
     distinguished by connector + window, so the slash command can populate the cache
     without reconstructing argument tuples:
         google_ads:mtd  google_ads:l30  google_ads:daily
-        bing:mtd        bing:l30
-        facebook:mtd    facebook:l30
+        bing:mtd        bing:l30        bing:daily
+        facebook:mtd    facebook:l30    facebook:daily
     """
     if date_preset:            window = "l30"
     elif "date" in fields:     window = "daily"

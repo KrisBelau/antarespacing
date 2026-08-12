@@ -21,7 +21,7 @@ entirely** — no Sheet writes, no Slack post.
 |---|---|
 | Sheet ID | `1V4NnVrjyiYZEM0-3Pb6fy7ZZX24bCmy_UcS2yijV1rc` |
 | Service account | `ziggyantares@ziggyadsbot.iam.gserviceaccount.com` |
-| Slack channel | `#autotune-pacing` |
+| Slack channel | `#antares-pacing` |
 | Google Ads | connector `google_ads`, account `802-485-7603` |
 | Microsoft Ads | connector `bing`, `account_name` = `Antares Adwords` |
 | Meta Ads | connector `facebook`, `account_name` = `Antares Ads` |
@@ -78,7 +78,7 @@ GSHEET_SA_KEYFILE=<path to sa-key.json> \
 WINDSOR_CACHE=/tmp/windsor_cache.json \
 SLACK_OUT=/tmp/pacing_digest.txt \
 TIMELAG_DIR=/home/user/antarespacing/timelag \
-PACING_SLACK='#autotune-pacing' \
+PACING_SLACK='#antares-pacing' \
 python3 pacing_tracker_daily.py
 ```
 
@@ -113,7 +113,7 @@ treating the run as clean.
 Skip entirely on `--dry-run`.
 
 Read `/tmp/pacing_digest.txt` and post it verbatim with
-`mcp__Slack__slack_send_message` to `#autotune-pacing`. Do not rewrite, re-rank or
+`mcp__Slack__slack_send_message` to `#antares-pacing`. Do not rewrite, re-rank or
 summarize the queues — the ordering is computed and the review gating is deliberate.
 
 ## Step 6 — report back
