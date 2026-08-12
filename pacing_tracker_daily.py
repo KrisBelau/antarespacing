@@ -41,6 +41,10 @@ from google.oauth2.service_account import Credentials
 
 # ---------------------------------------------------------------- CONFIG
 SHEET_ID        = os.environ.get("PACING_SHEET_ID", "REPLACE_WITH_SHEET_ID")
+# Bare URL on purpose: it auto-links under both delivery paths. The Slack MCP converts
+# standard markdown ([text](url)) while chat.postMessage expects Slack mrkdwn
+# (<url|text>), so any labelled syntax renders literally on one of the two.
+SHEET_URL       = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
 SA_KEYFILE      = os.environ["GSHEET_SA_KEYFILE"]
 SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#antares-pacing")
 TIMELAG_DIR     = os.environ.get("TIMELAG_DIR", "/tmp/timelag")   # drop new exports here
@@ -404,10 +408,11 @@ def main():
     # Cross-check: the daily series and the per-campaign MTD pull are independent reads
     # of the same quantity, so they should broadly agree.
     #
-    # They will not agree exactly. Two known reasons, neither a fault in this routine:
-    #   - date-level totals run slightly above the sum of campaign rows (spend not
-    #     attributable to a currently-reported campaign). Measured at ~1% on 2026-08-12.
-    #   - the current day is still accruing, and the two pulls happen seconds apart.
+    # They will not agree exactly: date-level totals run slightly above the sum of
+    # campaign rows, because they include spend not attributable to a currently-reported
+    # campaign. Measured at ~1% on 2026-08-12. (This is purely an aggregation
+    # difference - Windsor serves the same bytes between batch refreshes, so it is not
+    # the current day accruing between the two pulls.)
     # So ~1% is expected. The threshold is set at 3% to mean "structurally wrong"
     # (a platform dropped out, a filter stopped matching) rather than "normal noise" -
     # the drift is printed every run either way, so the number stays visible.
@@ -425,6 +430,44 @@ def main():
     if not DRY_RUN: stamp_lastrun(cfg)
 
     # ---- digest: headline metrics + the three review queues ----
+    def _n(x):
+        try: return float(str(x).replace("$","").replace(",","").replace("%","").replace("x","").strip())
+        except (ValueError, AttributeError): return 0.0
+
+    def blends_and_projection():
+        """
+        Return (uncorrected_blend, projected_blend, projected_mtd, budget_guardrail).
+
+        Two blends, both spend-weighted over L30D:
+          uncorrected = SUM(conv_value * incr_factor) / SUM(spend)   - booked to date
+          projected   = uncorrected * lag gross-up                    - once conversions mature
+        The gross-up is exactly the sheet's Config!C65, so `projected` matches the
+        sheet's own Blended Incremental ROAS cell rather than approximating it.
+
+        Projected MTD spend extrapolates actual spend over the month on days elapsed,
+        the same basis as the per-campaign Projected EOM column.
+        """
+        rows = tracker.get_values(f"D{DATA_START_ROW}:H47")
+        num = den = 0.0
+        for r in rows:
+            r = (r + [""]*5)[:5]
+            factor, spend, cv = _n(r[0]), _n(r[3]), _n(r[4])   # D, G, H
+            if spend <= 0: continue
+            num += cv*factor; den += spend
+        unc = (num/den) if den else 0.0
+
+        days_in_month = _n(cfg.cell(12,3).value) or 0
+        days_elapsed  = _n(cfg.cell(14,3).value) or 0
+        guardrail     = _n(cfg.cell(10,3).value)
+        proj_mtd = (total_mtd/days_elapsed*days_in_month) if days_elapsed else 0.0
+        return unc, unc*mult, proj_mtd, guardrail
+
+    uncorrected, projected_blend, projected_mtd, budget_guardrail = blends_and_projection()
+    over = ""
+    if budget_guardrail and projected_mtd:
+        delta = projected_mtd/budget_guardrail - 1
+        over = f"  ({'over' if delta>0 else 'under'} the ${budget_guardrail:,.0f} guardrail by {abs(delta)*100:.0f}%)"
+
     def hl(needle):
         col_a = tracker.col_values(1)
         for i, v in enumerate(col_a):
@@ -468,10 +511,13 @@ def main():
         *([":test_tube: *DRY RUN — nothing was written to the Sheet, do not post this.*"] if DRY_RUN else []),
         f":bar_chart: *AutoTune Pacing refreshed* ({TODAY:%b %d})",
         f"Total MTD spend: ${total_mtd:,.0f}",
-        f"Blended incremental ROAS (actuals): {hl('Blended Incremental ROAS')}  (floor {hl('Target iROAS Floor')})",
+        f"Projected MTD spend: ${projected_mtd:,.0f}{over}",
+        f"Blended incremental ROAS (Uncorrected): {uncorrected:.2f}x",
+        f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {hl('Target iROAS Floor')})",
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
         f"Potential upside/day (raises, not in blend): {hl('Potential upside')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
+        f"Sheet: {SHEET_URL}",
         "",
         ":warning: *All suggestions require review before applying.*",
     ]
