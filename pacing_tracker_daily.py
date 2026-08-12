@@ -33,8 +33,9 @@ Confidence notes (read before trusting output):
     understates its own tail because those conversions have not finished booking yet.
 """
 
-import os, csv, glob, datetime as dt
+import os, csv, glob, json, re, datetime as dt
 import gspread
+import requests
 from google.oauth2.service_account import Credentials
 
 # ---------------------------------------------------------------- CONFIG
@@ -42,6 +43,7 @@ SHEET_ID        = os.environ.get("PACING_SHEET_ID", "REPLACE_WITH_SHEET_ID")
 SA_KEYFILE      = os.environ["GSHEET_SA_KEYFILE"]
 SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#autotune-pacing")
 TIMELAG_DIR     = os.environ.get("TIMELAG_DIR", "/tmp/timelag")   # drop new exports here
+DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", "yes")
 
 GOOGLE_CID   = "802-485-7603"
 BING_ACCOUNT = "Antares Adwords"     # account_name filter value
@@ -58,18 +60,62 @@ COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
 TODAY = dt.date.today()
 
 # ================================================================ WINDSOR
+def windsor_cache_key(connector, fields, date_preset=None):
+    """
+    Stable name for one Windsor pull. The seven calls this routine makes are fully
+    distinguished by connector + window, so the slash command can populate the cache
+    without reconstructing argument tuples:
+        google_ads:mtd  google_ads:l30  google_ads:daily
+        bing:mtd        bing:l30
+        facebook:mtd    facebook:l30
+    """
+    if date_preset:            window = "l30"
+    elif "date" in fields:     window = "daily"
+    else:                      window = "mtd"
+    return f"{connector}:{window}"
+
 def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=None,
                 accounts=None, filters=None):
     """
-    Replace this body with an MCP call:
-      Windsor.ai:get_data(connector=connector, fields=fields, date_from=date_from,
-                          date_to=date_to, date_preset=date_preset, accounts=accounts,
-                          filters=filters)
-    Return the list[dict] Windsor returns. Field names are verified against get_fields:
+    Resolve one Windsor pull. Two sources, in priority order:
+
+    1. WINDSOR_CACHE - a JSON file {cache_key: [row, ...]} written by the caller.
+       This is how /antares-pacing-refresh runs it: the agent makes the
+       Windsor.ai:get_data MCP calls and drops the results here. MCP tools are only
+       callable from an agent session, not from a bare python process.
+    2. WINDSOR_API_KEY - direct REST against the Windsor API, so the same file can
+       run headless under cron with no agent in the loop.
+
+    Field names are verified live against get_fields (2026-08-12):
       google_ads: spend, conversions_value | bing: spend, revenue |
       facebook: spend, action_values_omni_purchase   (NOT conversions_value)
     """
-    raise NotImplementedError("Wire to Windsor.ai:get_data")
+    key = windsor_cache_key(connector, fields, date_preset)
+
+    cache_path = os.environ.get("WINDSOR_CACHE")
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path) as f:
+            cache = json.load(f)
+        if key in cache:
+            return cache[key]
+        raise KeyError(f"WINDSOR_CACHE {cache_path} has no entry {key!r}; "
+                       f"present: {sorted(cache)}")
+
+    api_key = os.environ.get("WINDSOR_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            f"No data source for {key}. Set WINDSOR_CACHE (agent-populated) or "
+            f"WINDSOR_API_KEY (headless REST).")
+
+    params = {"api_key": api_key, "fields": ",".join(fields), "_renderer": "json"}
+    if date_preset: params["date_preset"] = date_preset
+    if date_from:   params["date_from"] = date_from
+    if date_to:     params["date_to"] = date_to
+    if accounts:    params["accounts"] = ",".join(accounts)
+    if filters:     params["filters"] = json.dumps(filters)
+    r = requests.get(f"https://connectors.windsor.ai/{connector}", params=params, timeout=120)
+    r.raise_for_status()
+    return r.json().get("data", [])
 
 def pull_platform_mtd_and_l30():
     """Return {campaign: {platform, mtd_spend, mtd_cv, l30_spend, l30_cv}} across all 3 platforms."""
@@ -148,10 +194,44 @@ def parse_timelag_curve(path):
         cum+=daily[d]; curve[d]=round(cum/grand,4)
     return curve
 
+MIN_MATURITY_DAYS = int(os.environ.get("TIMELAG_MIN_MATURITY_DAYS", "28"))
+
+def timelag_window_end(path):
+    """End date of a Time Lag export, from its '# Date Range: ... - Mon D, YYYY' header."""
+    with open(path) as f:
+        head = f.read(2048)
+    mm = re.search(r"#\s*Date Range:\s*.+?-\s*([A-Z][a-z]{2} \d{1,2}, \d{4})", head)
+    if not mm:
+        return None
+    try:
+        return dt.datetime.strptime(mm.group(1), "%b %d, %Y").date()
+    except ValueError:
+        return None
+
 def refresh_curve_from_timelag():
-    """Return newest-export curve dict, or None if no export present."""
-    files=sorted(glob.glob(os.path.join(TIMELAG_DIR,"*.csv")), key=os.path.getmtime)
-    return parse_timelag_curve(files[-1]) if files else None
+    """
+    Return newest-export curve dict, or None if no usable export is present.
+
+    Guard: an export whose window ends less than MIN_MATURITY_DAYS ago has not
+    finished booking its own tail, so deriving a curve from it OVERSTATES early
+    maturity and understates the gross-up. Skipping is the safe failure: the
+    routine falls back to the existing Config curve rather than corrupting it.
+    Set TIMELAG_MIN_MATURITY_DAYS=0 to override.
+    """
+    files = sorted(glob.glob(os.path.join(TIMELAG_DIR, "*.csv")), key=os.path.getmtime)
+    for path in reversed(files):
+        end = timelag_window_end(path)
+        if end is None:
+            print(f"[timelag] {os.path.basename(path)}: no parseable '# Date Range' header - skipped")
+            continue
+        age = (TODAY - end).days
+        if age < MIN_MATURITY_DAYS:
+            print(f"[timelag] {os.path.basename(path)}: window ends {end} ({age}d ago), "
+                  f"needs {MIN_MATURITY_DAYS}d to mature - skipped, keeping existing curve")
+            continue
+        print(f"[timelag] {os.path.basename(path)}: window ends {end} ({age}d ago) - refreshing curve")
+        return parse_timelag_curve(path)
+    return None
 
 # ================================================================ SHEET I/O
 def _find_label_row(ws, needle):
@@ -190,8 +270,37 @@ def stamp_lastrun(cfg):
 
 # ================================================================ SLACK
 def post_slack(text):
-    """Wire to Slack:slack_send_message(channel=SLACK_CHANNEL, text=text)."""
-    raise NotImplementedError("Wire to Slack:slack_send_message")
+    """
+    Emit the digest. Two sinks, in priority order:
+
+    1. SLACK_OUT - write the rendered text to this path and stop. This is how
+       /antares-pacing-refresh runs it: the agent reads the file and posts via
+       Slack:slack_send_message(channel=SLACK_CHANNEL, text=...).
+    2. SLACK_BOT_TOKEN - post directly via chat.postMessage, so the same file can
+       run headless under cron.
+
+    With neither set, the digest goes to stdout and nothing is posted - deliberate,
+    so a misconfigured run is silent rather than posting somewhere unintended.
+    """
+    out_path = os.environ.get("SLACK_OUT")
+    if out_path:
+        with open(out_path, "w") as f:
+            f.write(text)
+        print(f"[digest written to {out_path} for agent to post to {SLACK_CHANNEL}]")
+        return
+
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    if not token:
+        print("[no SLACK_OUT or SLACK_BOT_TOKEN set - digest not posted]\n")
+        print(text)
+        return
+
+    r = requests.post("https://slack.com/api/chat.postMessage",
+                      headers={"Authorization": f"Bearer {token}"},
+                      json={"channel": SLACK_CHANNEL, "text": text}, timeout=30)
+    body = r.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Slack post failed: {body.get('error')}")
 
 # ================================================================ MAIN
 def main():
@@ -204,7 +313,8 @@ def main():
 
     new_curve=refresh_curve_from_timelag()
     if new_curve:
-        write_curve(cfg,new_curve); curve=new_curve
+        if not DRY_RUN: write_curve(cfg,new_curve)
+        curve=new_curve
     else:
         curve=read_curve(cfg)
     mult=spend_weighted_multiplier(curve,daily_spend)
@@ -212,23 +322,39 @@ def main():
     names=tracker.col_values(COL["campaign"])
     row_for={n:i+1 for i,n in enumerate(names) if i+1>=DATA_START_ROW and n}
     cells=[]
+    matched=[]
     for name,wrow in row_for.items():
         d=data.get(name)
         if not d: continue
+        matched.append(name)
         cells.append(gspread.Cell(wrow,COL["mtd"],   round(d["mtd_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30sp"], round(d["l30_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30cv"], round(d["l30_cv"],2)))
         if d["platform"]=="Meta Ads":
             cells.append(gspread.Cell(wrow,COL["daily"], round(d["l30_spend"]/30,2)))
-    if cells: tracker.update_cells(cells, value_input_option="USER_ENTERED")
 
-    write_multiplier(cfg,mult)
+    # Reconciliation: a campaign renamed on-platform silently stops updating, because
+    # rows are matched by exact name. Surface both sides of the mismatch every run.
+    unmatched_sheet=[n for n in row_for if n not in data]
+    unmatched_feed =[n for n in data if n not in row_for]
+    print(f"[match] {len(matched)}/{len(row_for)} sheet rows matched to Windsor campaigns")
+    for n in unmatched_sheet: print(f"  [!] in sheet, no Windsor data : {n}")
+    for n in unmatched_feed:  print(f"  [!] in Windsor, no sheet row  : {n}")
+
+    if cells and not DRY_RUN:
+        tracker.update_cells(cells, value_input_option="USER_ENTERED")
+    print(f"[write] {len(cells)} cells -> Pacing Tracker" + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
+
+    if not DRY_RUN: write_multiplier(cfg,mult)
 
     total_mtd=sum(d["mtd_spend"] for d in data.values())
     curve_ws=sh.worksheet(TAB_CURVE)
-    curve_ws.update_cell(3+(TODAY.day-1),4,round(total_mtd,2))
+    curve_row=3+(TODAY.day-1)
+    if not DRY_RUN: curve_ws.update_cell(curve_row,4,round(total_mtd,2))
+    print(f"[write] total MTD ${total_mtd:,.0f} -> Pacing Curve D{curve_row}"
+          + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
-    stamp_lastrun(cfg)
+    if not DRY_RUN: stamp_lastrun(cfg)
 
     # ---- digest: headline metrics + the three review queues ----
     def hl(needle):
@@ -271,6 +397,7 @@ def main():
         return out
 
     lines = [
+        *([":test_tube: *DRY RUN — nothing was written to the Sheet, do not post this.*"] if DRY_RUN else []),
         f":bar_chart: *AutoTune Pacing refreshed* ({TODAY:%b %d})",
         f"Total MTD spend: ${total_mtd:,.0f}",
         f"Blended incremental ROAS (actuals): {hl('Blended Incremental ROAS')}  (floor {hl('Target iROAS Floor')})",
