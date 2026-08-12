@@ -71,6 +71,24 @@ are skipped with a log line and the existing curve is kept.
 window that reads ~4pp "more mature" at day 5 than the true July curve, and would have
 dropped the gross-up from 1.101x to 1.083x.
 
+## Sheet changes made outside this repo
+
+**2026-08-12 — blended iROAS omitted the conversion-lag gross-up.** `Pacing Tracker`
+rows 50 (Blended Incremental ROAS) and 60 (GUARDRAIL STATUS) computed
+`SUMPRODUCT(H,D)/SUM(G)`, which drops `Config!$C$65`. Every per-campaign figure
+includes it — `I = H*C65/G`, `J = I*D`, and the waterline helper `U = H*C65*D` — so the
+headline blend was understated by exactly the gross-up factor while the queues were
+correct.
+
+It only became visible once live data landed: at the previous stale 1.31x the blend
+cleared the 1.25x floor either way, but fresh data read 1.15x, which crosses below the
+floor *only* because of the missing multiplier. The guardrail would have told the team
+to cut spend when the model's own per-campaign basis showed headroom.
+
+Both cells now read `SUM(U3:U47)/SUM(G3:G47)`, reusing the helper column that already
+applies the gross-up so the two paths cannot drift apart again. Blend went 1.15x ->
+1.27x, guardrail flipped to AT/ABOVE TARGET, queue counts unchanged (20 / 19 / 6).
+
 ## Known gaps
 
 - **Campaigns are matched by exact name.** Rename a campaign on-platform and its row
