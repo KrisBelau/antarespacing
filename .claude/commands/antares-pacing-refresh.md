@@ -32,7 +32,7 @@ entirely** — no Sheet writes, no Slack post.
 python3 -c "import datetime as d;t=d.date.today();print(f'MONTH_START={t.replace(day=1)}');print(f'TODAY={t}');print(f'D30_START={t-d.timedelta(days=29)}')"
 ```
 
-## Step 2 — pull the seven Windsor datasets
+## Step 2 — pull the nine Windsor datasets
 
 Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
@@ -89,7 +89,8 @@ The script writes only these cells, exactly as before:
   the daily baseline is approximated as L30D ÷ 30
 - `Config` C65 — spend-weighted lag gross-up
 - `Config` C77 — last-run stamp
-- `Pacing Curve` D(3 + day − 1) — today's cumulative MTD spend
+- `Pacing Curve` D3:D(today+2) — the full month-to-date cumulative spend series,
+  rewritten each run so the column self-heals after a missed run or a restatement
 
 Everything downstream (lag-adjusted ROAS, iROAS, bands, suggested budgets, guardrail,
 the three queues) is recomputed by the Sheet's own formulas.
