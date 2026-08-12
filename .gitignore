@@ -1,0 +1,15 @@
+# --- secrets: never commit service-account keys or tokens ---
+sa-key.json
+*-key.json
+ziggyadsbot-*.json
+service-account*.json
+credentials.json
+.env
+.env.*
+
+# --- local timelag drops (client data; refreshed manually) ---
+timelag/*.csv
+
+__pycache__/
+*.pyc
+.venv/
