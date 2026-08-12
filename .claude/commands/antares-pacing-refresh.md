@@ -34,7 +34,7 @@ python3 -c "import datetime as d;t=d.date.today();print(f'MONTH_START={t.replace
 
 ## Step 2 — pull the seven Windsor datasets
 
-Call `mcp__Windsor_ai__get_data` seven times. Field names below are verified against
+Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
 `action_values_omni_purchase`, *not* `conversions_value`.
 
@@ -45,10 +45,16 @@ Call `mcp__Windsor_ai__get_data` seven times. Field names below are verified aga
 | `google_ads:daily` | `google_ads` | `date, spend` | `date_from=D30_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
 | `bing:mtd` | `bing` | `campaign, spend, revenue` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
 | `bing:l30` | `bing` | `campaign, spend, revenue` | `date_preset="last_30d"`, same filter |
+| `bing:daily` | `bing` | `date, spend` | `date_from=D30_START`, `date_to=TODAY`, same filter |
 | `facebook:mtd` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
 | `facebook:l30` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_preset="last_30d"`, same filter |
+| `facebook:daily` | `facebook` | `date, spend` | `date_from=D30_START`, `date_to=TODAY`, same filter |
 
-Write all seven result arrays into one JSON file keyed exactly as above:
+The three `:daily` pulls feed the month-to-date cumulative series on Pacing Curve.
+Google's also feeds the lag gross-up — Google only, because the maturation curve comes
+from the Google Time Lag report.
+
+Write all nine result arrays into one JSON file keyed exactly as above:
 
 ```json
 { "google_ads:mtd": [ {...}, ... ], "google_ads:l30": [ ... ], ... }
@@ -59,8 +65,8 @@ Save it to `/tmp/windsor_cache.json`.
 **Sanity-check before continuing.** If any of these fail, stop and report rather than
 writing partial data to a live client sheet:
 
-- all seven keys present and non-empty
-- `google_ads:daily` has ~30 rows, one per date
+- all nine keys present and non-empty
+- each `:daily` key has ~30 rows, one per date
 - MTD spend totals are plausible (Google MTD has been running ~$45–50k mid-month)
 
 ## Step 3 — run the routine

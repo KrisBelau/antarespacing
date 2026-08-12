@@ -144,10 +144,33 @@ def pull_platform_mtd_and_l30():
     return out
 
 def pull_google_daily_spend():
-    """Trailing-30d daily spend (Google) -> {date: spend} for the spend-weighted multiplier."""
+    """Trailing-30d daily spend (Google) -> {date: spend} for the spend-weighted multiplier.
+
+    Google only, deliberately: the maturation curve is derived from the Google Time Lag
+    report, so the gross-up it feeds is a Google-shaped correction.
+    """
     start=(TODAY-dt.timedelta(days=29)).isoformat()
     rows=windsor_get("google_ads",["date","spend"],date_from=start,date_to=TODAY.isoformat(),accounts=[GOOGLE_CID])
     return {r["date"]:float(r.get("spend") or 0) for r in rows if r.get("date")}
+
+def pull_daily_spend_all_platforms():
+    """
+    Trailing-30d daily spend summed across all three platforms -> {date: spend}.
+
+    Feeds the month-to-date cumulative series on Pacing Curve. Separate from
+    pull_google_daily_spend() because that one is Google-only on purpose (see above),
+    whereas the pacing curve tracks total account spend against the budget guardrail.
+    """
+    start=(TODAY-dt.timedelta(days=29)).isoformat(); end=TODAY.isoformat()
+    totals={}
+    def add(rows):
+        for r in rows:
+            d=r.get("date")
+            if d: totals[d]=totals.get(d,0.0)+float(r.get("spend") or 0)
+    add(windsor_get("google_ads",["date","spend"],date_from=start,date_to=end,accounts=[GOOGLE_CID]))
+    add(windsor_get("bing",["date","spend"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]))
+    add(windsor_get("facebook",["date","spend"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]))
+    return totals
 
 # ================================================================ LAG MATH
 def spend_weighted_multiplier(curve, daily_spend):
@@ -264,6 +287,27 @@ def write_multiplier(cfg, mult):
     r=_find_label_row(cfg,"gross-up")
     if r: cfg.update_cell(r,3,round(mult,4))
 
+def mtd_series_cells(daily_all):
+    """
+    Cumulative month-to-date spend for day 1..today -> Pacing Curve col D cells.
+
+    Rewriting the whole series each run rather than only today's cell makes the column
+    self-healing: a missed run, a late-restating platform, or a backfill all correct
+    themselves on the next refresh. Row for day N is N+2 (day 1 -> row 3).
+
+    Returns (cells, cumulative_total, days_missing) where days_missing lists MTD dates
+    absent from the feed - those contribute 0 and would flat-line the curve, so the
+    caller surfaces them rather than writing a silently wrong series.
+    """
+    month_start=TODAY.replace(day=1)
+    cum=0.0; cells=[]; missing=[]
+    for n in range(1, TODAY.day+1):
+        d=(month_start+dt.timedelta(days=n-1)).isoformat()
+        if d not in daily_all: missing.append(d)
+        cum+=daily_all.get(d,0.0)
+        cells.append(gspread.Cell(n+2,4,round(cum,2)))
+    return cells, cum, missing
+
 def stamp_lastrun(cfg):
     r=_find_label_row(cfg,"Last routine run")
     if r: cfg.update_cell(r,3,dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z"))
@@ -309,7 +353,8 @@ def main():
     tracker=sh.worksheet(TAB_TRACKER); cfg=sh.worksheet(TAB_CONFIG)
 
     data=pull_platform_mtd_and_l30()
-    daily_spend=pull_google_daily_spend()
+    daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
+    daily_all=pull_daily_spend_all_platforms() # all three  -> pacing curve series
 
     new_curve=refresh_curve_from_timelag()
     if new_curve:
@@ -349,9 +394,31 @@ def main():
 
     total_mtd=sum(d["mtd_spend"] for d in data.values())
     curve_ws=sh.worksheet(TAB_CURVE)
-    curve_row=3+(TODAY.day-1)
-    if not DRY_RUN: curve_ws.update_cell(curve_row,4,round(total_mtd,2))
-    print(f"[write] total MTD ${total_mtd:,.0f} -> Pacing Curve D{curve_row}"
+
+    # Rewrite the whole month-to-date cumulative series, not just today's cell.
+    series_cells, series_total, missing_days = mtd_series_cells(daily_all)
+    for d in missing_days:
+        print(f"  [!] no daily spend for {d} - counted as $0 in the pacing curve")
+
+    # Cross-check: the daily series and the per-campaign MTD pull are independent reads
+    # of the same quantity, so they should broadly agree.
+    #
+    # They will not agree exactly. Two known reasons, neither a fault in this routine:
+    #   - date-level totals run slightly above the sum of campaign rows (spend not
+    #     attributable to a currently-reported campaign). Measured at ~1% on 2026-08-12.
+    #   - the current day is still accruing, and the two pulls happen seconds apart.
+    # So ~1% is expected. The threshold is set at 3% to mean "structurally wrong"
+    # (a platform dropped out, a filter stopped matching) rather than "normal noise" -
+    # the drift is printed every run either way, so the number stays visible.
+    drift = abs(series_total - total_mtd)
+    pct = (drift/total_mtd*100) if total_mtd else 0.0
+    flag = "" if pct <= 3.0 else "   <== investigate before trusting either figure"
+    print(f"[check] MTD from daily series ${series_total:,.0f} vs from campaigns "
+          f"${total_mtd:,.0f}  (drift ${drift:,.0f}, {pct:.1f}%){flag}")
+
+    if not DRY_RUN:
+        curve_ws.update_cells(series_cells, value_input_option="USER_ENTERED")
+    print(f"[write] {len(series_cells)} cumulative cells -> Pacing Curve D3:D{len(series_cells)+2}"
           + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
     if not DRY_RUN: stamp_lastrun(cfg)

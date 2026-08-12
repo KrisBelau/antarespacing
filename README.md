@@ -25,7 +25,7 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 | `Pacing Tracker` | **F** daily budget — *Meta rows only*, approximated as L30D ÷ 30 (Meta uses CBO/lifetime budgets) |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
-| `Pacing Curve` | **D**(3 + day − 1) today's cumulative MTD spend |
+| `Pacing Curve` | **D3:D**(today+2) full month-to-date cumulative spend series, rewritten each run |
 
 Nothing else is touched.
 
@@ -75,8 +75,10 @@ dropped the gross-up from 1.101x to 1.083x.
 
 - **Campaigns are matched by exact name.** Rename a campaign on-platform and its row
   silently stops updating. Every run prints a reconciliation block — read it.
-- **`Pacing Curve` column D has no history.** The routine writes only today's cell, so
-  prior days retain whatever is already there. As of 2026-08-12 rows 3–13 hold
-  placeholder data (a flat ~$146/day ramp) that needs a one-time backfill, or the chart
-  will read as a flat line with a spike at today.
+- **Two MTD figures that don't quite agree.** The pacing curve is built from date-level
+  daily spend; the tracker rows come from a campaign-level pull. Date-level totals run
+  ~1% higher, because they include spend not attributable to a currently-reported
+  campaign row. Each run prints both and the drift; it only flags above 3%, which would
+  mean something structural (a platform dropped out, a filter stopped matching) rather
+  than this known gap. Measured 2026-08-12: $61,181 vs $60,551.
 - **`total_mtd`** sums every campaign Windsor returns, including any with no sheet row.
