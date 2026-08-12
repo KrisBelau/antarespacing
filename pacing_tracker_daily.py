@@ -45,7 +45,8 @@ SHEET_ID        = os.environ.get("PACING_SHEET_ID", "REPLACE_WITH_SHEET_ID")
 # standard markdown ([text](url)) while chat.postMessage expects Slack mrkdwn
 # (<url|text>), so any labelled syntax renders literally on one of the two.
 SHEET_URL       = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
-SA_KEYFILE      = os.environ["GSHEET_SA_KEYFILE"]
+SA_KEYFILE      = os.environ.get("GSHEET_SA_KEYFILE")     # path to the key file, or...
+SA_KEY_JSON     = os.environ.get("GSHEET_SA_KEY_JSON")    # ...the key JSON inline
 SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#antares-pacing")
 TIMELAG_DIR     = os.environ.get("TIMELAG_DIR", "/tmp/timelag")   # drop new exports here
 DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -352,8 +353,23 @@ def post_slack(text):
         raise RuntimeError(f"Slack post failed: {body.get('error')}")
 
 # ================================================================ MAIN
+def sheets_credentials():
+    """
+    Service-account credentials from either source, inline JSON first.
+
+    GSHEET_SA_KEY_JSON exists for scheduled/headless runs: secret managers hand you a
+    value, not a file on disk, and it keeps the key out of the filesystem entirely.
+    GSHEET_SA_KEYFILE stays the convenient path for interactive runs.
+    """
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    if SA_KEY_JSON:
+        return Credentials.from_service_account_info(json.loads(SA_KEY_JSON), scopes=scopes)
+    if SA_KEYFILE:
+        return Credentials.from_service_account_file(SA_KEYFILE, scopes=scopes)
+    raise RuntimeError("No credentials: set GSHEET_SA_KEY_JSON (inline) or GSHEET_SA_KEYFILE (path).")
+
 def main():
-    creds=Credentials.from_service_account_file(SA_KEYFILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    creds=sheets_credentials()
     gc=gspread.authorize(creds); sh=gc.open_by_key(SHEET_ID)
     tracker=sh.worksheet(TAB_TRACKER); cfg=sh.worksheet(TAB_CONFIG)
 

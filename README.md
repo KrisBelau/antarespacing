@@ -34,7 +34,8 @@ Nothing else is touched.
 | Env var | Purpose |
 |---|---|
 | `PACING_SHEET_ID` | Target Sheet. Currently `1V4NnVrjyiYZEM0-3Pb6fy7ZZX24bCmy_UcS2yijV1rc` |
-| `GSHEET_SA_KEYFILE` | **Required.** Path to the service-account JSON |
+| `GSHEET_SA_KEYFILE` | Path to the service-account JSON |
+| `GSHEET_SA_KEY_JSON` | The service-account JSON inline, for secret managers. Takes precedence over the path. One of the two is required |
 | `WINDSOR_CACHE` | JSON of pre-fetched Windsor results (how the slash command feeds it) |
 | `WINDSOR_API_KEY` | Alternative to the cache — direct REST, for headless/cron runs |
 | `SLACK_OUT` | Write the digest here instead of posting (slash command reads it back) |
@@ -70,6 +71,32 @@ are skipped with a log line and the existing curve is kept.
 `tests/fixtures/timelag_2026-08-05_to_08-11_IMMATURE.csv` is a real example: a 7-day
 window that reads ~4pp "more mature" at day 5 than the true July curve, and would have
 dropped the gross-up from 1.101x to 1.083x.
+
+## Scheduling
+
+Routine `trig_012PJ6qGrvVKeJwu3D2LioXV` — "Antares pacing refresh — daily 7am PT",
+cron `0 14 * * *` (UTC), fresh session per fire. **Currently disabled**, see below.
+
+**Daylight saving.** Cron runs in UTC and does not follow DST. `0 14 * * *` is 07:00
+Pacific during PDT. When PST resumes (2026-11-01) it becomes 06:00 Pacific — change to
+`0 15 * * *` then, and back again in March.
+
+**Before enabling**, the fired session needs credentials it does not currently have.
+Trigger-fired sessions run **without MCP connector tools**, so the slash-command flow
+(Windsor MCP -> cache -> Slack MCP) cannot run there. Two ways to fix:
+
+1. *Headless / REST (recommended).* Set three environment secrets and the routine needs
+   no MCP at all:
+   - `WINDSOR_API_KEY` — `windsor_get` falls back to the Windsor REST API
+   - `SLACK_BOT_TOKEN` — `post_slack` uses `chat.postMessage` directly
+   - `GSHEET_SA_KEY_JSON` — the service-account key inline (no file on disk)
+
+   Then drop `WINDSOR_CACHE` and `SLACK_OUT` from the invocation; the same file runs
+   end to end unattended.
+
+2. *Recreate the Routine from the claude.ai Routines UI*, attaching the Windsor, Slack
+   and Google Drive connectors. The stored prompt already handles fetching the key
+   from Drive. Faster to set up, but depends on connector auth staying valid.
 
 ## Sheet changes made outside this repo
 
