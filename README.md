@@ -40,7 +40,7 @@ Nothing else is touched.
 | `WINDSOR_API_KEY` | Alternative to the cache — direct REST, for headless/cron runs |
 | `SLACK_OUT` | Write the digest here instead of posting (slash command reads it back) |
 | `SLACK_BOT_TOKEN` | Alternative to `SLACK_OUT` — post directly via `chat.postMessage` |
-| `PACING_SLACK` | Channel. Defaults to `#antares-pacing` |
+| `PACING_SLACK` | Channel. Defaults to `#antares-pacing-internal` |
 | `TIMELAG_DIR` | Where Time Lag CSV exports are dropped |
 | `TIMELAG_MIN_MATURITY_DAYS` | Maturity guard, default `28`. See below |
 | `PACING_DRY_RUN` | `1` to skip all writes and the Slack post |

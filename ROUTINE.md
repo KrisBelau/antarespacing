@@ -54,7 +54,9 @@ Python deps: if gspread / google-auth are missing, `pip install gspread google-a
 google-api-python-client`. If `cryptography` then fails to import, reinstall it with
 `pip install --upgrade --force-reinstall cffi cryptography`.
 
-Post the digest to #antares-pacing (channel id C0BPYHZUH9S).
+Post the digest to #antares-pacing-internal (channel id C0BQR78495Y). This is a
+private, non-shared channel — #antares-pacing (C0BPYHZUH9S) is an external Slack
+Connect channel and rejects bot-posted messages.
 
 STOP AND DO NOT POST if any of these are true — report the failure instead:
   - any of the nine Windsor pulls returns empty

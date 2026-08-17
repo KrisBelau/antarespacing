@@ -47,7 +47,7 @@ SHEET_ID        = os.environ.get("PACING_SHEET_ID", "REPLACE_WITH_SHEET_ID")
 SHEET_URL       = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
 SA_KEYFILE      = os.environ.get("GSHEET_SA_KEYFILE")     # path to the key file, or...
 SA_KEY_JSON     = os.environ.get("GSHEET_SA_KEY_JSON")    # ...the key JSON inline
-SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#antares-pacing")
+SLACK_CHANNEL   = os.environ.get("PACING_SLACK", "#antares-pacing-internal")
 TIMELAG_DIR     = os.environ.get("TIMELAG_DIR", "/tmp/timelag")   # drop new exports here
 DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", "yes")
 
