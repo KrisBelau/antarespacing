@@ -19,7 +19,7 @@ What this routine does each morning:
      column self-heals after a missed run or a platform restatement.
   6. (Optional) If a fresh Google "Time Lag" CSV export is dropped in TIMELAG_DIR,
      re-derive the maturation curve and overwrite the curve cells in Config.
-  7. Post a Slack digest: actual blended iROAS vs floor, guardrail status, potential upside,
+  7. Post a Slack digest: actual blended iROAS vs floor, guardrail status,
      and the three review queues (Cut or Fix / Raise / Reduce). All suggestions are review-gated.
 
 Confidence notes (read before trusting output):
@@ -531,7 +531,6 @@ def main():
         f"Blended incremental ROAS (Uncorrected): {uncorrected:.2f}x",
         f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {hl('Target iROAS Floor')})",
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
-        f"Potential upside/day (raises, not in blend): {hl('Potential upside')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
         f"Sheet: {SHEET_URL}",
         "",
