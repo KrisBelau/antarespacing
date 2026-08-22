@@ -21,7 +21,7 @@ entirely** — no Sheet writes, no Slack post.
 |---|---|
 | Sheet ID | `1V4NnVrjyiYZEM0-3Pb6fy7ZZX24bCmy_UcS2yijV1rc` |
 | Service account | `ziggyantares@ziggyadsbot.iam.gserviceaccount.com` |
-| Slack channel | `#antares-pacing` |
+| Slack channel | `#antares-pacing-internal` (the original `#antares-pacing` is externally shared and rejects bot posts) |
 | Google Ads | connector `google_ads`, account `802-485-7603` |
 | Microsoft Ads | connector `bing`, `account_name` = `Antares Adwords` |
 | Meta Ads | connector `facebook`, `account_name` = `Antares Ads` |
@@ -67,7 +67,7 @@ writing partial data to a live client sheet:
 
 - all nine keys present and non-empty
 - each `:daily` key has ~30 rows, one per date
-- MTD spend totals are plausible (Google MTD has been running ~$45–50k mid-month)
+- MTD spend totals are plausible (Google MTD has been running ~$85–95k mid-month)
 
 ## Step 3 — run the routine
 
@@ -113,8 +113,9 @@ treating the run as clean.
 Skip entirely on `--dry-run`.
 
 Read `/tmp/pacing_digest.txt` and post it verbatim with
-`mcp__Slack__slack_send_message` to `#antares-pacing`. Do not rewrite, re-rank or
-summarize the queues — the ordering is computed and the review gating is deliberate.
+`mcp__Slack__slack_send_message` to `#antares-pacing-internal` (channel_id
+`C0BQR78495Y`). Do not rewrite, re-rank or summarize the queues — the ordering is
+computed and the review gating is deliberate.
 
 ## Step 6 — report back
 
