@@ -119,6 +119,6 @@ computed and the review gating is deliberate.
 
 ## Step 6 — report back
 
-Give the user: blended iROAS vs floor, guardrail status, total MTD spend, the lag
-gross-up used, queue counts (Cut or Fix / Raise / Reduce), and anything from step 4
-that needs attention.
+Give the user: blended iROAS vs floor, guardrail status, total MTD spend, the $0-revenue
+budget headroom to the floor, the lag gross-up used, queue counts (Cut or Fix / Raise /
+Reduce), and anything from step 4 that needs attention.
