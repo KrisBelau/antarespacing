@@ -112,6 +112,23 @@ Cumulative comes from the date-level daily series ($61,181), so the two differ b
 where they meet at today. That is the known aggregation gap documented under Known gaps,
 not a further error.
 
+## Digest queue ordering
+
+Cut or Fix and Reduce rank by absolute daily $ change: the story there is how much money
+is moving. **Raise ranks by iROAS**, deliberately.
+
+Ranking raises by dollars surfaces the largest budgets, which are systematically the
+*least* efficient of the raises — a campaign is small precisely because it has not been
+scaled yet, so its dollar delta stays small while its efficiency is the best in the
+account. On 2026-08-26 the five raises shown by a dollar sort ran 1.61x–2.84x while
+9.04x, 4.89x and 4.84x sat unseen in the "+14 more" line. That is the opposite of what
+the waterline model is trying to do.
+
+iROAS is joined from `Pacing Tracker` col J by campaign name; the Suggestions Tracker
+does not carry it. A queue row with no matching tracker row sorts last and is reported
+in the run log — distinct from a genuine `0.00x`, which is a real value and common in
+Cut or Fix.
+
 ## Known gaps
 
 - **Campaigns are matched by exact name.** Rename a campaign on-platform and its row

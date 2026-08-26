@@ -21,6 +21,7 @@ What this routine does each morning:
      re-derive the maturation curve and overwrite the curve cells in Config.
   7. Post a Slack digest: actual blended iROAS vs floor, guardrail status, potential upside,
      and the three review queues (Cut or Fix / Raise / Reduce). All suggestions are review-gated.
+     Cut or Fix and Reduce rank by dollars; Raise ranks by iROAS - see queue_block().
 
 Confidence notes (read before trusting output):
   - Lag multiplier is SPEND-WEIGHTED: it weights each day's maturity by that day's actual
@@ -496,7 +497,16 @@ def main():
     st_ws = sh.worksheet("Suggestions Tracker")
     st_rows = st_ws.get_all_values()
     from collections import defaultdict
-    queues = defaultdict(list)  # action -> list of (campaign, cur, sug)
+
+    # iROAS per campaign, joined from Pacing Tracker col J by campaign name (col B).
+    # The Suggestions Tracker does not carry iROAS, and the Raise queue ranks on it.
+    iroas_by_campaign = {}
+    for r in tracker.get_values(f"B{DATA_START_ROW}:J47"):
+        r = (list(r) + [""]*9)[:9]
+        if r[0]:
+            iroas_by_campaign[r[0]] = _n(r[8])
+
+    queues = defaultdict(list)  # action -> list of (campaign, cur, sug, iroas)
     for row in st_rows[2:]:
         if len(row) < 6:
             continue
@@ -504,21 +514,39 @@ def main():
         if action not in ("Cut or Fix", "Raise", "Reduce"):
             continue
         camp = row[1]
-        def _num(x):
-            try: return float(str(x).replace("$", "").replace(",", ""))
-            except (ValueError, AttributeError): return 0.0
-        queues[action].append((camp, _num(row[4]), _num(row[5])))
+        # .get() returns None for a name absent from the tracker, which is a real
+        # problem; 0.0 is a legitimate iROAS (zero conversion value) and must not be
+        # confused with it. Both sort last in Raise, but only the former is worth a warning.
+        queues[action].append((camp, _n(row[4]), _n(row[5]), iroas_by_campaign.get(camp)))
 
-    def queue_block(action, header, top=5):
+    unmatched = sorted({c for a in queues for c, _cur, _sug, ir in queues[a] if ir is None})
+    if unmatched:
+        print(f"  [!] {len(unmatched)} queue rows have no Pacing Tracker row to take iROAS "
+              f"from, so they sort last in Raise: {unmatched[:3]}")
+
+    def queue_block(action, header, top=5, by_iroas=False):
+        """
+        Rank and render one queue.
+
+        Cut or Fix and Reduce rank by absolute daily $ change - there the story is how
+        much money is moving, so the biggest leaks belong at the top.
+
+        Raise ranks by iROAS. Ranking raises by dollars surfaces the largest budgets,
+        which are systematically the LEAST efficient of the raises: a campaign is small
+        precisely because it has not been scaled yet, so its dollar delta stays small
+        while its efficiency is the best in the account. Sorting raises by money buries
+        exactly the campaigns the waterline model wants to grow.
+        """
         items = queues.get(action, [])
         if not items:
             return [f"{header}: none this refresh"]
-        # rank by absolute daily $ change, biggest first
-        items.sort(key=lambda t: -abs(t[2] - t[1]))
+        items.sort(key=(lambda t: -(t[3] if t[3] is not None else -1.0)) if by_iroas
+                   else (lambda t: -abs(t[2] - t[1])))
         out = [f"{header}: {len(items)} campaigns"]
-        for camp, cur, sug in items[:top]:
+        for camp, cur, sug, iroas in items[:top]:
             delta = sug - cur
-            out.append(f"   \u2022 {camp[:44]}  ${cur:,.0f} \u2192 ${sug:,.0f} ({delta:+,.0f})")
+            lead = (f"{iroas:.2f}x  " if iroas is not None else "  n/a  ") if by_iroas else ""
+            out.append(f"   \u2022 {lead}{camp[:40]}  ${cur:,.0f} \u2192 ${sug:,.0f} ({delta:+,.0f})")
         if len(items) > top:
             out.append(f"   \u2026 +{len(items) - top} more (see Suggestions Tracker)")
         return out
@@ -538,7 +566,7 @@ def main():
         ":warning: *All suggestions require review before applying.*",
     ]
     lines += queue_block("Cut or Fix", ":mag: *Cut or Fix* (below 1.0x — diagnose tracking/LP/approvals/audience first)")
-    lines += queue_block("Raise", ":arrow_up: *Raise if volume available* (ceiling lift; credit only if spend lands)")
+    lines += queue_block("Raise", ":arrow_up: *Raise if volume available* (ranked by iROAS; ceiling lift, credit only if spend lands)", by_iroas=True)
     lines += queue_block("Reduce", ":arrow_down: *Reduce* (below waterline; right-size down)")
     post_slack("\n".join(lines))
 
