@@ -491,6 +491,15 @@ def main():
                 return tracker.cell(i + 1, 5).value
         return None
 
+    # Zero-revenue headroom: how much MORE could land on top of the projected month-end
+    # spend, generating literally $0 additional revenue, before the projected blend
+    # itself would fall below the floor. Solve projected_revenue/(projected_mtd+X) = floor
+    # for X, where projected_revenue = projected_blend * projected_mtd:
+    #   X = projected_mtd * (projected_blend/floor - 1)
+    # Negative means the projection is already under floor -- there is no headroom to give.
+    floor_iroas = _n(hl('Target iROAS Floor'))
+    headroom = projected_mtd * (projected_blend/floor_iroas - 1) if floor_iroas else 0.0
+
     # Read the grouped Suggestions Tracker: action in col C, campaign col B,
     # current col E, suggested col F. Section-header rows have no action value.
     st_ws = sh.worksheet("Suggestions Tracker")
@@ -530,6 +539,8 @@ def main():
         f"Projected MTD spend: ${projected_mtd:,.0f}{over}",
         f"Blended incremental ROAS (Uncorrected): {uncorrected:.2f}x",
         f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {hl('Target iROAS Floor')})",
+        f"Budget headroom at $0 incremental revenue (stay ≥ {floor_iroas:.2f}x floor): "
+        + (f"${headroom:,.0f}" if headroom >= 0 else "$0  (already below floor -- no headroom)"),
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
         f"Potential upside/day (raises, not in blend): {hl('Potential upside')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
