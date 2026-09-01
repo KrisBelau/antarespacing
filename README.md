@@ -113,6 +113,19 @@ Cumulative comes from the date-level daily series ($61,181), so the two differ b
 where they meet at today. That is the known aggregation gap documented under Known gaps,
 not a further error.
 
+**2026-09-01 — rolled the sheet to September and rebuilt August.** `Config!C11` was a
+hardcoded `=DATE(2026,8,1)` while the routine derives its window from `TODAY`, so the
+Sep 1 run wrote September data into August's rows. C11 is now
+`=EOMONTH(TODAY(),-1)+1`, which self-rolls; `C12/C14/C15` and the whole Pacing Curve
+(dates, guardrail line, day-31 blanking) already derived from it, so nothing else needed
+touching. `Pacing Curve D3:D33` was cleared for the new month.
+
+August is archived as static values in **`Pacing Curve (Aug 2026)`**, rebuilt from
+Windsor daily spend rather than copied: the live tab was understated by \$7,122 — Aug 1's
+spend — on every day from the 2nd onward, because of the trailing-30d window bug. Real
+August total was **\$154,495 against the \$140,000 guardrail (10.4% over)**, not the
+\$140,837 the sheet displayed.
+
 ## Digest queue ordering
 
 Cut or Fix and Reduce rank by absolute daily $ change: the story there is how much money
