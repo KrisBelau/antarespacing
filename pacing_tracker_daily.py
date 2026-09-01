@@ -67,6 +67,19 @@ COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
 
 TODAY = dt.date.today()
 
+def daily_window():
+    """
+    One date window serving both daily pulls, so they share a cache key without
+    disagreeing about what it holds.
+
+    Two needs: the lag gross-up wants the trailing 30 days, the pacing curve wants
+    month-start..today. Neither is a superset of the other - on the 1st the month is
+    one day, and from day 31 a trailing-30d window no longer reaches the 1st. Take the
+    union. Consumers narrow it themselves: the multiplier filters by day age, the curve
+    looks up only this month's dates.
+    """
+    return min(TODAY.replace(day=1), TODAY - dt.timedelta(days=29)).isoformat(), TODAY.isoformat()
+
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None):
     """
@@ -157,19 +170,24 @@ def pull_google_daily_spend():
     Google only, deliberately: the maturation curve is derived from the Google Time Lag
     report, so the gross-up it feeds is a Google-shaped correction.
     """
-    start=(TODAY-dt.timedelta(days=29)).isoformat()
-    rows=windsor_get("google_ads",["date","spend"],date_from=start,date_to=TODAY.isoformat(),accounts=[GOOGLE_CID])
+    start, end = daily_window()
+    rows=windsor_get("google_ads",["date","spend"],date_from=start,date_to=end,accounts=[GOOGLE_CID])
     return {r["date"]:float(r.get("spend") or 0) for r in rows if r.get("date")}
 
 def pull_daily_spend_all_platforms():
     """
-    Trailing-30d daily spend summed across all three platforms -> {date: spend}.
+    Month-to-date daily spend summed across all three platforms -> {date: spend}.
 
     Feeds the month-to-date cumulative series on Pacing Curve. Separate from
-    pull_google_daily_spend() because that one is Google-only on purpose (see above),
-    whereas the pacing curve tracks total account spend against the budget guardrail.
+    pull_google_daily_spend() in two ways: that one is Google-only on purpose (see
+    above), and it uses a trailing-30d window because the lag curve is about the last
+    30 days, whereas the curve needs month-start..today. Both now request daily_window(),
+    the union of the two, so they can share one cache key. A trailing-30d window alone
+    stops covering the 1st of the month from day 31 onward, which silently scores the
+    month's opening days as $0 and drags the whole cumulative curve down - that is
+    exactly what corrupted August (understated by $7,122/day from Aug 2).
     """
-    start=(TODAY-dt.timedelta(days=29)).isoformat(); end=TODAY.isoformat()
+    start, end = daily_window()
     totals={}
     def add(rows):
         for r in rows:
