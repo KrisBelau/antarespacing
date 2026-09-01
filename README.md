@@ -44,6 +44,7 @@ Nothing else is touched.
 | `TIMELAG_DIR` | Where Time Lag CSV exports are dropped |
 | `TIMELAG_MIN_MATURITY_DAYS` | Maturity guard, default `28`. See below |
 | `PACING_DRY_RUN` | `1` to skip all writes and the Slack post |
+| `PACING_ALLOW_MONTH_MISMATCH` | `1` to bypass the month-rollover guard. See below |
 
 With neither `SLACK_OUT` nor `SLACK_BOT_TOKEN` set, the digest prints to stdout and is
 **not** posted — a misconfigured run stays silent rather than posting somewhere
@@ -128,6 +129,23 @@ iROAS is joined from `Pacing Tracker` col J by campaign name; the Suggestions Tr
 does not carry it. A queue row with no matching tracker row sorts last and is reported
 in the run log — distinct from a genuine `0.00x`, which is a real value and common in
 Cut or Fix.
+
+## Month rollover
+
+`Config!C11` (reporting month) is a hardcoded `=DATE(y,m,1)` set by hand, but the
+routine derives its MTD window and its Pacing Curve row index from `TODAY`. When those
+disagree everything lands in the wrong place: MTD columns fill with the new month's
+partial spend while days-elapsed, month-fraction and the curve's date labels still
+describe the old month, and day N of the new month overwrites day N of the old.
+
+The routine now refuses to run on a mismatch. To roll over:
+
+1. `Config!C11` -> the new month's 1st (or make it dynamic: `=EOMONTH(TODAY(),-1)+1`)
+2. `Pacing Curve` column B date labels -> the new month
+3. Archive or clear `Pacing Curve` column D, which still holds last month's cumulative
+
+`PACING_ALLOW_MONTH_MISMATCH=1` overrides the guard; only use it for a run you have
+reasoned about.
 
 ## Known gaps
 

@@ -19,8 +19,9 @@ What this routine does each morning:
      column self-heals after a missed run or a platform restatement.
   6. (Optional) If a fresh Google "Time Lag" CSV export is dropped in TIMELAG_DIR,
      re-derive the maturation curve and overwrite the curve cells in Config.
-  7. Post a Slack digest: actual blended iROAS vs floor, guardrail status, potential upside,
-     and the three review queues (Cut or Fix / Raise / Reduce). All suggestions are review-gated.
+  7. Post a Slack digest: blended iROAS vs floor, $0-revenue budget headroom, guardrail
+     status, and the three review queues (Cut or Fix / Raise / Reduce). All suggestions
+     are review-gated.
      Cut or Fix and Reduce rank by dollars; Raise ranks by iROAS - see queue_block().
 
 Confidence notes (read before trusting output):
@@ -354,6 +355,17 @@ def post_slack(text):
         raise RuntimeError(f"Slack post failed: {body.get('error')}")
 
 # ================================================================ MAIN
+def sheet_reporting_month(cfg):
+    """The month Config!C11 says the sheet is tracking, or None if unparseable."""
+    raw = cfg.get_values("C11", value_render_option="UNFORMATTED_VALUE")
+    v = raw[0][0] if raw and raw[0] else None
+    if isinstance(v, (int, float)):                       # Sheets serial date
+        return dt.date(1899, 12, 30) + dt.timedelta(days=int(v))
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try: return dt.datetime.strptime(str(v).strip(), fmt).date()
+        except (ValueError, TypeError): pass
+    return None
+
 def sheets_credentials():
     """
     Service-account credentials from either source, inline JSON first.
@@ -373,6 +385,25 @@ def main():
     creds=sheets_credentials()
     gc=gspread.authorize(creds); sh=gc.open_by_key(SHEET_ID)
     tracker=sh.worksheet(TAB_TRACKER); cfg=sh.worksheet(TAB_CONFIG)
+
+    # Month-rollover guard, before anything is written.
+    #
+    # Config!C11 (reporting month) is set by hand, but this routine derives its MTD
+    # window and its Pacing Curve row index from TODAY. When those disagree, every write
+    # lands in the wrong place: the MTD columns fill with the new month's partial spend
+    # while days-elapsed, month-fraction and the curve's date labels still describe the
+    # old one, and day N of the new month silently overwrites day N of the old.
+    # Refuse rather than corrupt. Override only to force a run you have reasoned about.
+    reporting_month = sheet_reporting_month(cfg)
+    if reporting_month is None:
+        raise RuntimeError("Cannot read Config!C11 (reporting month); refusing to write.")
+    if (reporting_month.year, reporting_month.month) != (TODAY.year, TODAY.month) \
+       and not os.environ.get("PACING_ALLOW_MONTH_MISMATCH"):
+        raise RuntimeError(
+            f"Sheet is tracking {reporting_month:%B %Y} but today is {TODAY:%B %Y}. "
+            f"Roll the sheet over first - Config!C11 and the Pacing Curve date column - "
+            f"otherwise {TODAY:%B}'s spend overwrites {reporting_month:%B}'s rows. "
+            f"Set PACING_ALLOW_MONTH_MISMATCH=1 to override.")
 
     data=pull_platform_mtd_and_l30()
     daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
@@ -476,10 +507,26 @@ def main():
         days_in_month = _n(cfg.cell(12,3).value) or 0
         days_elapsed  = _n(cfg.cell(14,3).value) or 0
         guardrail     = _n(cfg.cell(10,3).value)
+        # Floor comes from Config!C6, the same cell the sheet's own formulas reference.
+        # Do NOT source it from hl('Target iROAS Floor'): that is a substring search over
+        # column A, and it returns None the moment the label is reworded - which silently
+        # zeroes anything derived from it instead of failing loudly.
+        floor         = _n(cfg.cell(6,3).value)
         proj_mtd = (total_mtd/days_elapsed*days_in_month) if days_elapsed else 0.0
-        return unc, unc*mult, proj_mtd, guardrail
+        return unc, unc*mult, proj_mtd, guardrail, floor
 
-    uncorrected, projected_blend, projected_mtd, budget_guardrail = blends_and_projection()
+    uncorrected, projected_blend, projected_mtd, budget_guardrail, floor_iroas = blends_and_projection()
+    if not floor_iroas:
+        raise RuntimeError("Config!C6 (target iROAS floor) is empty or unparseable; "
+                           "refusing to build a digest whose headroom would read $0.")
+
+    # Zero-revenue budget headroom: how much MORE could land on top of projected month-end
+    # spend, generating $0 additional revenue, before the projected blend falls to the
+    # floor. Solve projected_revenue/(projected_mtd + X) = floor, where
+    # projected_revenue = projected_blend * projected_mtd:
+    #     X = projected_mtd * (projected_blend/floor - 1)
+    # Negative means the projection is already under the floor: no headroom to give.
+    headroom = projected_mtd * (projected_blend/floor_iroas - 1)
     over = ""
     if budget_guardrail and projected_mtd:
         delta = projected_mtd/budget_guardrail - 1
@@ -557,9 +604,10 @@ def main():
         f"Total MTD spend: ${total_mtd:,.0f}",
         f"Projected MTD spend: ${projected_mtd:,.0f}{over}",
         f"Blended incremental ROAS (Uncorrected): {uncorrected:.2f}x",
-        f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {hl('Target iROAS Floor')})",
+        f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {floor_iroas:.2f}x)",
+        f"Budget headroom at $0 incremental revenue (stay \u2265 {floor_iroas:.2f}x floor): "
+        + (f"${headroom:,.0f}" if headroom >= 0 else "$0  (already below floor \u2014 no headroom)"),
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
-        f"Potential upside/day (raises, not in blend): {hl('Potential upside')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
         f"Sheet: {SHEET_URL}",
         "",
