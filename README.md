@@ -141,7 +141,10 @@ changes Sheet structure, so it is a separate, deliberate step.
 The digest reports named segments (`SEGMENTS` in `pacing_tracker_daily.py`: Video Views,
 Control Arm, Treatment Arm) on their own lines while leaving them in the blend. Each
 shows L30D spend and share, value, ROAS, iROAS, and the blend with and without it, on the
-same basis as the headline. Control and Treatment are separate on purpose.
+same basis as the headline. All of it is rolling 30 days, deliberately: month-to-date
+would put start-of-month effects (immature conversions, a short window) into the
+efficiency read, so MTD is used only for spend pacing. Control and Treatment are separate
+on purpose.
 
 ## Digest queue ordering
 

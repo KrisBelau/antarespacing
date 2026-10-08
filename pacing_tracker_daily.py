@@ -382,7 +382,9 @@ def segment_lines(block, mult):
                    f"value ${cv:,.0f}, ROAS {cv*mult/sp:.2f}x, iROAS {iv/sp:.2f}x. "
                    f"Blend {all_blend:.2f}x with, {ex:.2f}x without ({all_blend-ex:+.2f}x)")
     if not out: return []
-    return [":mag_right: *Reported separately (all included in the blend above)*", *out]
+    start=TODAY-dt.timedelta(days=29)
+    return [f":mag_right: *Reported separately (all included in the blend above). Rolling 30 days, "
+            f"{start:%b %d} to {TODAY:%b %d}, same basis as the blended iROAS*", *out]
 
 # ================================================================ SLACK
 def post_slack(text):
@@ -694,8 +696,8 @@ def main():
         f":bar_chart: *AutoTune Pacing refreshed* ({TODAY:%b %d})",
         f"Total MTD spend: ${total_mtd:,.0f}",
         f"Projected MTD spend: ${projected_mtd:,.0f}{over}",
-        f"Blended incremental ROAS (Uncorrected): {uncorrected:.2f}x",
-        f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {floor_iroas:.2f}x)",
+        f"Blended incremental ROAS, L30D (Uncorrected): {uncorrected:.2f}x",
+        f"Projected Blended incremental ROAS, L30D: {projected_blend:.2f}x  (floor {floor_iroas:.2f}x)",
         f"Budget headroom at $0 incremental revenue (stay \u2265 {floor_iroas:.2f}x floor): "
         + (f"${headroom:,.0f}" if headroom >= 0 else "$0  (already below floor \u2014 no headroom)"),
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
