@@ -40,6 +40,7 @@ import os, csv, glob, json, re, datetime as dt
 import gspread
 import requests
 from google.oauth2.service_account import Credentials
+from add_campaign_rows import add_rows, infer_channel_type
 
 # ---------------------------------------------------------------- CONFIG
 SHEET_ID        = os.environ.get("PACING_SHEET_ID", "REPLACE_WITH_SHEET_ID")
@@ -70,6 +71,12 @@ SEGMENTS = [
 ]
 # A gap is called out in the digest once uncovered spend passes this share of L30D spend.
 COVERAGE_WARN_PCT = float(os.environ.get("COVERAGE_WARN_PCT", "1.0"))
+# New campaigns with spend get a Sheet row automatically (see add_campaign_rows.py).
+# If more than AUTO_ADD_MAX appear at once, none are added and the digest flags it: that
+# pattern means a mass rename or a bad pull, not thirty launches, and inserting thirty
+# rows into a live Sheet on that evidence is the wrong failure mode.
+AUTO_ADD = os.environ.get("AUTO_ADD_CAMPAIGNS", "1").lower() not in ("0", "false", "no")
+AUTO_ADD_MAX = int(os.environ.get("AUTO_ADD_MAX", "5"))
 
 # Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily, Meta only), G(l30sp), H(l30cv).
 COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
@@ -483,6 +490,26 @@ def main():
         curve=read_curve(cfg)
     mult=spend_weighted_multiplier(curve,daily_spend)
 
+    # Give any campaign with spend and no row a row, before rows are matched. Windsor only
+    # returns campaigns with data in the window, so this covers anything spending.
+    existing={n for i,n in enumerate(tracker.col_values(COL["campaign"])) if i+1>=DATA_START_ROW and n}
+    fresh=sorted(((n,d) for n,d in data.items()
+                  if n not in existing and (d["l30_spend"]>0 or d["mtd_spend"]>0)),
+                 key=lambda t:-t[1]["l30_spend"])
+    auto_added=[]; auto_blocked=0
+    if fresh and AUTO_ADD:
+        if len(fresh)>AUTO_ADD_MAX:
+            auto_blocked=len(fresh)
+            print(f"[auto-add] {len(fresh)} new campaigns exceeds AUTO_ADD_MAX={AUTO_ADD_MAX}; "
+                  f"adding none. Check for a mass rename or a bad pull, then run add_campaign_rows.py.")
+        else:
+            specs=[{"platform":d["platform"],"name":n,"channel_type":infer_channel_type(d["platform"],n),
+                    "daily_budget":round(d["l30_spend"]/30,2),
+                    "notes":f"Auto-added {TODAY}. Daily budget is a placeholder (L30D spend / 30); "
+                            f"set the live budget. Channel type read from the name."}
+                   for n,d in fresh]
+            auto_added=add_rows(sh, specs, dry_run=DRY_RUN)
+
     names=tracker.col_values(COL["campaign"])
     row_for={n:i+1 for i,n in enumerate(names) if i+1>=DATA_START_ROW and n}
     # Last row of the campaign block. Everything below it (headline, guardrail) has its
@@ -703,6 +730,12 @@ def main():
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
         f"Sheet: {SHEET_URL}",
+        *([f":heavy_plus_sign: *Added {len(auto_added)} new campaign(s) to the Sheet automatically*: "
+           + "; ".join(re.sub(r"^(Google|Microsoft) Ads \| ","",a)[:60] for a in auto_added[:3])
+           + (f"; +{len(auto_added)-3} more" if len(auto_added)>3 else "")
+           + ". Daily budget is a placeholder (L30D spend / 30) until set to the live budget."] if auto_added else []),
+        *([f":rotating_light: *{auto_blocked} new campaigns not added* (over the auto-add limit of {AUTO_ADD_MAX}). "
+           f"Check for a mass rename, then run add_campaign_rows.py."] if auto_blocked else []),
         *([f":rotating_light: *Coverage gap*: {len(gap)} campaigns with spend have no Sheet row, "
            f"${gap_l30:,.0f} L30D ({gap_pct:.1f}% of spend). The blend excludes them. "
            f"Add with add_campaign_rows.py: " + "; ".join(re.sub(r"^(Google|Microsoft) Ads \| ","",g[0])[:60] for g in gap[:3])

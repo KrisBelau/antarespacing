@@ -64,7 +64,9 @@ STOP AND DO NOT POST if any of these are true — report the failure instead:
   - fewer than ~40 of the 45 campaign rows match by name
   - the run log shows a drift flag above 3% on the MTD cross-check
 
-Do not change the Sheet's formulas or the routine's logic. All budget suggestions in the
+Do not change the Sheet's formulas or the routine's logic. (The script itself adds a row for a
+new campaign with spend, copying the row above's formulas. That is intended and is not a
+formula change; do not undo it.) All budget suggestions in the
 digest are review-gated; never apply them to the ad platforms.
 ```
 

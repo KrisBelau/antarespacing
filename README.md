@@ -128,7 +128,17 @@ August total was **\$154,495 against the \$140,000 guardrail (10.4% over)**, not
 
 ## Adding campaigns
 
-`add_campaign_rows.py` gives new campaigns a row. It inserts inside the tracker's data
+**Automatic.** Each run, any campaign Windsor returns with MTD or L30D spend and no
+Sheet row is added by `add_rows()` before rows are matched, so it is in the blend the
+same day. Channel type is read from the name (`infer_channel_type`; anything unrecognised
+takes the Config default factor of 0.65). Daily budget is a placeholder, L30D spend / 30,
+flagged in the row's Notes and in the digest, because Windsor has no budgets: set the
+live figure. Guards: more than `AUTO_ADD_MAX` (default 5) new campaigns at once adds
+none and flags it, since that pattern is a mass rename or a bad pull; `AUTO_ADD_CAMPAIGNS=0`
+turns it off; a dry run only prints the plan. A renamed campaign adds its new name and
+leaves the old row stale with no data; retire it by hand.
+
+**By hand.** `add_campaign_rows.py` gives new campaigns a row. It inserts inside the tracker's data
 range so the headline, iROAS Frontier, Pacing Curve projection and sorted prototype all
 grow with it, copies the row above's formulas and formatting, and appends the matching
 links on `Alerts` and `Suggestions Tracker` (both are linked one tracker row at a time).
