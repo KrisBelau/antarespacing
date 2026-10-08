@@ -69,7 +69,12 @@ def last_data_row(tracker):
 
 
 def last_filled_row(ws, col=1):
-    vals = ws.col_values(col)
+    """Last row with anything in `col`, counting formulas that currently display blank.
+
+    Alerts links every row with an IF(...,"") formula, so most of its rows show nothing.
+    Reading displayed values would call those rows empty and the append would overwrite
+    live links."""
+    vals = ws.col_values(col, value_render_option="FORMULA")
     return max((i + 1 for i, v in enumerate(vals) if v), default=0)
 
 
@@ -166,8 +171,8 @@ def main():
         row = [re.sub(rf"\$A{START}\b", f"$A{ar}", c) for c in row]
         a_vals.append(row)
         s_vals.append([relink(c, s_old, trow) if isinstance(c, str) else c for c in s_tpl_row])
-    al.update(f"A{a_first}:E{a_first + n - 1}", a_vals, value_input_option="USER_ENTERED")
-    sg.update(f"A{s_first}:J{s_first + n - 1}", s_vals, value_input_option="USER_ENTERED")
+    al.update(range_name=f"A{a_first}:E{a_first + n - 1}", values=a_vals, value_input_option="USER_ENTERED")
+    sg.update(range_name=f"A{s_first}:J{s_first + n - 1}", values=s_vals, value_input_option="USER_ENTERED")
     sh.batch_update({"requests": [
         {"copyPaste": {"source": {"sheetId": al.id, "startRowIndex": a_first - 2, "endRowIndex": a_first - 1,
                                   "startColumnIndex": 0, "endColumnIndex": 5},
