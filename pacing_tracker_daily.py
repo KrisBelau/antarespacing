@@ -60,6 +60,17 @@ META_ACCOUNT = "Antares Ads"
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
 
+# Campaigns reported on their own in the digest, in addition to (never instead of) the
+# blend. Matched on campaign name. Each is (label, regex). The Control and Treatment arms
+# are separate entries on purpose: pooling them would hide the comparison they exist for.
+SEGMENTS = [
+    ("Video Views",   r"\| Video \|"),
+    ("Control Arm",   r"Control Arm$"),
+    ("Treatment Arm", r"Treatment Arm$"),
+]
+# A gap is called out in the digest once uncovered spend passes this share of L30D spend.
+COVERAGE_WARN_PCT = float(os.environ.get("COVERAGE_WARN_PCT", "1.0"))
+
 # Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily, Meta only), G(l30sp), H(l30cv).
 COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
          l30roas=9,iroas=10,ivsf=11,band=12,sugg=13,dbud=14,exp=15,pace=16,proj=17,
@@ -338,6 +349,41 @@ def stamp_lastrun(cfg):
     r=_find_label_row(cfg,"Last routine run")
     if r: cfg.update_cell(r,3,dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z"))
 
+def _num(x):
+    try: return float(str(x).replace("$","").replace(",","").replace("%","").replace("x","").strip())
+    except (ValueError, AttributeError): return 0.0
+
+def segment_lines(block, mult):
+    """
+    Report named segments on their own while leaving them IN the blend.
+
+    `block` is the Pacing Tracker campaign block, columns B..J: name, type, factor,
+    MTD, budget, L30D spend, L30D value, lag-adjusted ROAS, iROAS.
+
+    For each segment: L30D spend and share, raw conversion value, lag-adjusted ROAS and
+    iROAS, and what it does to the projected blend, as the blend with it minus the blend
+    without it. Same basis as the headline (value x factor x lag gross-up over L30D
+    spend), so the numbers reconcile to the Sheet.
+    """
+    rows=[(r[0],_num(r[2]),_num(r[5]),_num(r[6])) for r in block if r[0] and _num(r[5])>0]
+    tot_sp=sum(sp for _,_f,sp,_cv in rows)
+    if not tot_sp: return []
+    tot_iv=sum(cv*f for _,f,_sp,cv in rows)*mult
+    all_blend=tot_iv/tot_sp
+    out=[]
+    for label,pat in SEGMENTS:
+        seg=[x for x in rows if re.search(pat,x[0])]
+        if not seg: continue
+        sp=sum(x[2] for x in seg); cv=sum(x[3] for x in seg)
+        iv=sum(x[3]*x[1] for x in seg)*mult
+        rest=tot_sp-sp
+        ex=((tot_iv-iv)/rest) if rest else 0.0
+        out.append(f"   \u2022 {label}: ${sp:,.0f} L30D ({sp/tot_sp*100:.1f}% of spend), "
+                   f"value ${cv:,.0f}, ROAS {cv*mult/sp:.2f}x, iROAS {iv/sp:.2f}x. "
+                   f"Blend {all_blend:.2f}x with, {ex:.2f}x without ({all_blend-ex:+.2f}x)")
+    if not out: return []
+    return [":mag_right: *Reported separately (all included in the blend above)*", *out]
+
 # ================================================================ SLACK
 def post_slack(text):
     """
@@ -437,6 +483,13 @@ def main():
 
     names=tracker.col_values(COL["campaign"])
     row_for={n:i+1 for i,n in enumerate(names) if i+1>=DATA_START_ROW and n}
+    # Last row of the campaign block. Everything below it (headline, guardrail) has its
+    # label in column A and nothing in B, so the first blank in B ends the block. Not a
+    # constant: add_campaign_rows.py grows the block when a campaign is added.
+    end_row=DATA_START_ROW-1
+    for i in range(DATA_START_ROW-1, len(names)):
+        if not names[i]: break
+        end_row=i+1
     cells=[]
     matched=[]
     for name,wrow in row_for.items():
@@ -456,6 +509,23 @@ def main():
     print(f"[match] {len(matched)}/{len(row_for)} sheet rows matched to Windsor campaigns")
     for n in unmatched_sheet: print(f"  [!] in sheet, no Windsor data : {n}")
     for n in unmatched_feed:  print(f"  [!] in Windsor, no sheet row  : {n}")
+
+    # Coverage: spend the blend cannot see. A campaign with spend and no row is in the
+    # MTD total but absent from iROAS, the guardrail and the queues, so the headline
+    # flatters the account by exactly its share of spend. Reported in the log always and
+    # in the digest once it passes COVERAGE_WARN_PCT. The fix is add_campaign_rows.py.
+    gap=[(n,data[n]["l30_spend"],data[n]["mtd_spend"]) for n in unmatched_feed
+         if data[n]["l30_spend"]>0 or data[n]["mtd_spend"]>0]
+    gap.sort(key=lambda t:-t[1])
+    all_l30=sum(d["l30_spend"] for d in data.values())
+    gap_l30=sum(g[1] for g in gap)
+    gap_pct=(gap_l30/all_l30*100) if all_l30 else 0.0
+    if gap:
+        print(f"[coverage] {len(gap)} campaigns with spend have no sheet row: "
+              f"${gap_l30:,.0f} L30D ({gap_pct:.1f}% of L30D spend)")
+        for n,l30,mtd in gap: print(f"    ${l30:>9,.0f} L30D  ${mtd:>8,.0f} MTD  {n}")
+    else:
+        print("[coverage] every campaign with spend has a sheet row")
 
     if cells and not DRY_RUN:
         tracker.update_cells(cells, value_input_option="USER_ENTERED")
@@ -500,6 +570,11 @@ def main():
         try: return float(str(x).replace("$","").replace(",","").replace("%","").replace("x","").strip())
         except (ValueError, AttributeError): return 0.0
 
+    # One read of the campaign block, B..J: name, type, factor, MTD, budget, L30D spend,
+    # L30D value, lag-adjusted ROAS, iROAS. Feeds the blend, the iROAS join and the
+    # separate-reporting block below.
+    block = [(list(r)+[""]*9)[:9] for r in tracker.get_values(f"B{DATA_START_ROW}:J{end_row}")]
+
     def blends_and_projection():
         """
         Return (uncorrected_blend, projected_blend, projected_mtd, budget_guardrail).
@@ -513,11 +588,9 @@ def main():
         Projected MTD spend extrapolates actual spend over the month on days elapsed,
         the same basis as the per-campaign Projected EOM column.
         """
-        rows = tracker.get_values(f"D{DATA_START_ROW}:H47")
         num = den = 0.0
-        for r in rows:
-            r = (r + [""]*5)[:5]
-            factor, spend, cv = _n(r[0]), _n(r[3]), _n(r[4])   # D, G, H
+        for r in block:
+            factor, spend, cv = _n(r[2]), _n(r[5]), _n(r[6])   # D, G, H
             if spend <= 0: continue
             num += cv*factor; den += spend
         unc = (num/den) if den else 0.0
@@ -566,8 +639,7 @@ def main():
     # iROAS per campaign, joined from Pacing Tracker col J by campaign name (col B).
     # The Suggestions Tracker does not carry iROAS, and the Raise queue ranks on it.
     iroas_by_campaign = {}
-    for r in tracker.get_values(f"B{DATA_START_ROW}:J47"):
-        r = (list(r) + [""]*9)[:9]
+    for r in block:
         if r[0]:
             iroas_by_campaign[r[0]] = _n(r[8])
 
@@ -616,6 +688,7 @@ def main():
             out.append(f"   \u2026 +{len(items) - top} more (see Suggestions Tracker)")
         return out
 
+    seg_lines = segment_lines(block, mult)
     lines = [
         *([":test_tube: *DRY RUN — nothing was written to the Sheet, do not post this.*"] if DRY_RUN else []),
         f":bar_chart: *AutoTune Pacing refreshed* ({TODAY:%b %d})",
@@ -628,7 +701,13 @@ def main():
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
         f"Sheet: {SHEET_URL}",
+        *([f":rotating_light: *Coverage gap*: {len(gap)} campaigns with spend have no Sheet row, "
+           f"${gap_l30:,.0f} L30D ({gap_pct:.1f}% of spend). The blend excludes them. "
+           f"Add with add_campaign_rows.py: " + "; ".join(re.sub(r"^(Google|Microsoft) Ads \| ","",g[0])[:60] for g in gap[:3])
+           + (f"; +{len(gap)-3} more" if len(gap)>3 else "")] if gap and gap_pct>=COVERAGE_WARN_PCT else []),
         "",
+        *seg_lines,
+        *([""] if seg_lines else []),
         ":warning: *All suggestions require review before applying.*",
     ]
     lines += queue_block("Cut or Fix", ":mag: *Cut or Fix* (below 1.0x — diagnose tracking/LP/approvals/audience first)")

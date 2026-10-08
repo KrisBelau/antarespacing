@@ -126,6 +126,23 @@ spend — on every day from the 2nd onward, because of the trailing-30d window b
 August total was **\$154,495 against the \$140,000 guardrail (10.4% over)**, not the
 \$140,837 the sheet displayed.
 
+## Adding campaigns
+
+`add_campaign_rows.py` gives new campaigns a row. It inserts inside the tracker's data
+range so the headline, iROAS Frontier, Pacing Curve projection and sorted prototype all
+grow with it, copies the row above's formulas and formatting, and appends the matching
+links on `Alerts` and `Suggestions Tracker` (both are linked one tracker row at a time).
+A spec entry with `"replaces"` takes over a stale row in place instead. It skips any name
+already present and has `--dry-run`. The daily routine only flags gaps; adding rows
+changes Sheet structure, so it is a separate, deliberate step.
+
+## Separate reporting
+
+The digest reports named segments (`SEGMENTS` in `pacing_tracker_daily.py`: Video Views,
+Control Arm, Treatment Arm) on their own lines while leaving them in the blend. Each
+shows L30D spend and share, value, ROAS, iROAS, and the blend with and without it, on the
+same basis as the headline. Control and Treatment are separate on purpose.
+
 ## Digest queue ordering
 
 Cut or Fix and Reduce rank by absolute daily $ change: the story there is how much money
@@ -163,7 +180,15 @@ reasoned about.
 ## Known gaps
 
 - **Campaigns are matched by exact name.** Rename a campaign on-platform and its row
-  silently stops updating. Every run prints a reconciliation block — read it.
+  silently stops updating. Every run prints a reconciliation block, and a `[coverage]`
+  line totalling the spend that has no row. Past `COVERAGE_WARN_PCT` (default 1% of L30D
+  spend) the digest carries a coverage warning, because a campaign with spend and no row
+  is in the MTD total but missing from the blend, so the headline flatters the account.
+  Coverage means campaigns Windsor returns with spend in the MTD or L30D window; a
+  campaign launched but not yet spending is not visible. Fix with `add_campaign_rows.py`
+  (below).
+- **Google `Daily Budget` (col F) is typed in, not refreshed.** The routine writes col F
+  for Meta only. Suggested budgets scale it, so a stale F skews every Google suggestion.
 - **Two MTD figures that don't quite agree.** The pacing curve is built from date-level
   daily spend; the tracker rows come from a campaign-level pull. Date-level totals run
   ~1% higher, because they include spend not attributable to a currently-reported
