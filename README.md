@@ -218,6 +218,44 @@ conversions lag spend within the day, so today reads low for reasons unrelated t
 performance. On 2026-10-15 it read 0.52x on \$1,705 of spend against a ~\$4,700 daily
 norm, while MTD sat at 1.07x.
 
+### The two digest windows
+
+The Slack digest carries four ROAS figures on three windows, so each states its window:
+
+| Line | Window | Source |
+|---|---|---|
+| Blended incremental ROAS (L30D, uncorrected) | L30D | Pacing Tracker cols G/H |
+| Projected Blended incremental ROAS (L30D) | L30D | the above x `Config!C65` |
+| Projected iROAS, month to date | 1st to today | iROAS Daily, last MTD value |
+| Projected iROAS, last 7 complete days | ends yesterday | `window_iroas` |
+
+The two iROAS lines come off the same basis as the tab, so Slack and the Sheet tie out:
+per-day age-based maturity gross-up, blended incrementality factor, spend-weighted.
+
+**Spend-weighted, not a mean of the daily ratios.** `window_iroas` is
+`SUM(projected conv value) / SUM(spend)`. A mean of ratios would weight a $200 day the
+same as a $7,000 one, so a single thin day with a lucky conversion could move it several
+points while changing nothing about the account.
+
+**The 7-day window ends yesterday.** Today is a partial day that reads low for reasons
+about the clock, not performance. It is 1/7 of a weekly window against 1/30 of a monthly
+one, so including it would drag the weekly number by roughly four times as much. MTD does
+include today, so it reconciles with the MTD spend line above it; by mid-month that drag
+is small and shrinking.
+
+**Read the 7-day number for mix changes before reading it for performance.** It is the
+most sensitive figure in the digest and it moves for two reasons that are not efficiency:
+
+- *Mix.* The incrementality factor is a single L30D-weighted blend. A week whose channel
+  mix differs from the trailing month is scored with the wrong factor. On 2026-10-15 the
+  line read 1.30x against 1.07x MTD; Oct 8-14 vs Oct 1-7 was +27% booked, but the video
+  views campaign was 19.2% of Oct 1-7 spend at $0 conversion value and 1.0% of Oct 8-14.
+  Ex-video the same comparison is **+4%**. Nearly all of the lift was that campaign
+  ending.
+- *Maturity.* A 7-day window sits entirely in the steep part of the curve. That same run
+  grossed Oct 8-14 up by 23% against 13% for Oct 1-7, so the weekly number leans hardest
+  on the least certain part of the curve.
+
 **A channel pausing or launching is a break in the series,** not a result: it moves the
 blended factor. Bing was paused around 2026-10-06, so comparisons across that date are
 not like for like.

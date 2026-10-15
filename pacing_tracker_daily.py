@@ -437,23 +437,51 @@ def blended_incrementality_factor(tracker, last_row):
         nu += cv*f; de += cv
     return (nu/de) if de else 0.65
 
+def maturity_at(curve, age):
+    """Share of a day's conversions booked by now, given the day's age."""
+    return 1.0 if (age >= 28 or age < 0) else curve.get(age, 1.0)
+
+def matured(detail, curve):
+    """
+    {date: (spend, projected conv value)} - each day grossed up by ITS OWN maturity from
+    the Config curve, by age, not by the spend-weighted multiplier. That multiplier is a
+    single number describing an aggregate L30D window; applied to an individual day it
+    would under-gross yesterday (only ~75% booked) and over-gross a day from three weeks
+    ago (~98% booked).
+    """
+    out = {}
+    for d, (sp, cv) in detail.items():
+        age = (TODAY - dt.date.fromisoformat(d)).days
+        out[d] = (sp, cv / (maturity_at(curve, age) or 1.0))
+    return out
+
+def window_iroas(proj, factor, days, end):
+    """
+    Spend-weighted iROAS over `days` ending on `end` inclusive:
+    SUM(projected conv value) / SUM(spend), NOT the mean of the per-day ratios.
+
+    The two are not the same number. A mean of ratios weights a $200 day equally with a
+    $7,000 one, so one thin day with a lucky conversion can move it several points while
+    changing almost nothing about the account. Returns None on zero spend in the window,
+    which is absent, not 0.00x.
+    """
+    sp = v = 0.0
+    for k in range(days):
+        s2, v2 = proj.get((end - dt.timedelta(days=k)).isoformat(), (0.0, 0.0))
+        sp += s2; v += v2
+    return (v*factor/sp) if sp else None
+
 def iroas_daily_rows(detail, curve, factor, floor=None):
     """
     Per-day rows: spend, projected conversion value, and iROAS daily / MTD / rolling-30.
 
-    Each day is grossed up by ITS OWN maturity from the Config curve, by age, not by the
-    spend-weighted multiplier. That multiplier is a single number describing an aggregate
-    L30D window; applying it to an individual day would under-gross yesterday (only ~75%
-    booked) and over-gross a day from three weeks ago (~98% booked). On a daily series
-    that is the difference between seeing a change take effect and seeing the booking
-    curve. Recent days still carry the widest error bars - a one-day move is not a result.
+    Each day is grossed up by its own age-based maturity - see matured(). On a daily
+    series that is the difference between seeing a change take effect and seeing the
+    booking curve. Recent days still carry the widest error bars: a one-day move is not
+    a result.
     """
-    def mat(age): return 1.0 if (age >= 28 or age < 0) else curve.get(age, 1.0)
-    proj = {}
-    for d, (sp, cv) in detail.items():
-        age = (TODAY - dt.date.fromisoformat(d)).days
-        mt = mat(age) or 1.0
-        proj[d] = (sp, cv/mt)
+    def mat(age): return maturity_at(curve, age)
+    proj = matured(detail, curve)
 
     this_start = TODAY.replace(day=1)
     prev_start = (this_start - dt.timedelta(days=1)).replace(day=1)
@@ -467,10 +495,7 @@ def iroas_daily_rows(detail, curve, factor, floor=None):
         d = day.isoformat()
         sp, pcv = proj.get(d, (0.0, 0.0))
         mtd_sp += sp; mtd_v += pcv
-        r_sp = r_v = 0.0
-        for k in range(30):                 # rolling 30 runs straight through the boundary
-            s2, v2 = proj.get((day - dt.timedelta(days=k)).isoformat(), (0.0, 0.0))
-            r_sp += s2; r_v += v2
+        r30 = window_iroas(proj, factor, 30, day)   # runs straight through the boundary
         age = (TODAY - day).days
         # Today is still running: partial spend AND partial booking, and conversions lag
         # spend within the day too, so the ratio reads low for reasons that have nothing
@@ -481,7 +506,7 @@ def iroas_daily_rows(detail, curve, factor, floor=None):
                      round(mat(age),4),
                      round(pcv*factor/sp, 4) if sp else "",
                      round(mtd_v*factor/mtd_sp, 4) if mtd_sp else "",
-                     round(r_v*factor/r_sp, 4) if r_sp else "",
+                     round(r30, 4) if r30 is not None else "",
                      floor if floor else "", note])
         day += dt.timedelta(days=1)
     return rows
@@ -745,6 +770,19 @@ def main():
               f"(factor {blend_factor:.3f}; today day={last[6]} mtd={last[7]} r30={last[8]})"
               + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
+    # Headline windows for the digest, on the same basis as the tab so the two tie out:
+    # per-day maturity gross-up, blended incrementality factor, spend-weighted.
+    #   MTD  - the tab's last MTD value, so it matches the MTD spend line above it.
+    #          Includes today, which is a partial day; by mid-month that drag is small
+    #          and shrinking.
+    #   L7   - the seven COMPLETE days ending yesterday. Today is 1/7 of a weekly window
+    #          against 1/30 of a monthly one, so including it would drag the number by
+    #          roughly four times as much, for reasons that are about the clock rather
+    #          than performance.
+    proj_days = matured(detail, curve)
+    iroas_mtd = (iroas_rows[-1][7] or None) if iroas_rows else None
+    iroas_l7  = window_iroas(proj_days, blend_factor, 7, TODAY - dt.timedelta(days=1))
+
     if not DRY_RUN: stamp_lastrun(cfg)
 
     # ---- digest: headline metrics + the three review queues ----
@@ -801,6 +839,10 @@ def main():
     if budget_guardrail and projected_mtd:
         delta = projected_mtd/budget_guardrail - 1
         over = f"  ({'over' if delta>0 else 'under'} the ${budget_guardrail:,.0f} guardrail by {abs(delta)*100:.0f}%)"
+
+    def _x(v):
+        """Render a ratio, or n/a. An empty window is absent, not 0.00x."""
+        return f"{v:.2f}x" if v is not None else "n/a"
 
     def hl(needle):
         col_a = tracker.col_values(1)
@@ -873,8 +915,11 @@ def main():
         f":bar_chart: *AutoTune Pacing refreshed* ({TODAY:%b %d})",
         f"Total MTD spend: ${total_mtd:,.0f}",
         f"Projected MTD spend: ${projected_mtd:,.0f}{over}",
-        f"Blended incremental ROAS (Uncorrected): {uncorrected:.2f}x",
-        f"Projected Blended incremental ROAS: {projected_blend:.2f}x  (floor {floor_iroas:.2f}x)",
+        f"Blended incremental ROAS (L30D, uncorrected): {uncorrected:.2f}x",
+        f"Projected Blended incremental ROAS (L30D): {projected_blend:.2f}x  (floor {floor_iroas:.2f}x)",
+        f"Projected iROAS, month to date: " + _x(iroas_mtd),
+        f"Projected iROAS, last 7 complete days "
+        f"({TODAY - dt.timedelta(days=7):%b %-d}–{TODAY - dt.timedelta(days=1):%b %-d}): " + _x(iroas_l7),
         f"Budget headroom at $0 incremental revenue (stay \u2265 {floor_iroas:.2f}x floor): "
         + (f"${headroom:,.0f}" if headroom >= 0 else "$0  (already below floor \u2014 no headroom)"),
         f"Guardrail: {hl('GUARDRAIL STATUS')}",

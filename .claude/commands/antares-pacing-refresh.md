@@ -29,8 +29,20 @@ entirely** — no Sheet writes, no Slack post.
 ## Step 1 — resolve dates
 
 ```bash
-python3 -c "import datetime as d;t=d.date.today();print(f'MONTH_START={t.replace(day=1)}');print(f'TODAY={t}');print(f'D30_START={t-d.timedelta(days=29)}')"
+python3 -c "
+import datetime as d
+t = d.date.today()
+prev = (t.replace(day=1) - d.timedelta(days=1)).replace(day=1)
+print(f'MONTH_START={t.replace(day=1)}')
+print(f'TODAY={t}')
+print(f'DAILY_START={min(prev - d.timedelta(days=29), t - d.timedelta(days=29))}')"
 ```
+
+`DAILY_START` is **not** simply today minus 29. iROAS Daily shows last month plus this
+month to date, and its rolling-30 column needs a further 29-day lead-in so it is complete
+on the 1st of last month instead of ramping up from nothing. The routine's
+`daily_window()` computes exactly this union; feeding it a shorter window silently
+truncates last month. Every consumer narrows the window itself.
 
 ## Step 2 — pull the nine Windsor datasets
 
@@ -42,13 +54,13 @@ Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified agai
 |---|---|---|---|
 | `google_ads:mtd` | `google_ads` | `campaign, spend, conversions_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
 | `google_ads:l30` | `google_ads` | `campaign, spend, conversions_value` | `date_preset="last_30d"`, `accounts=["802-485-7603"]` |
-| `google_ads:daily` | `google_ads` | `date, spend, conversions_value` | `date_from=D30_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
+| `google_ads:daily` | `google_ads` | `date, spend, conversions_value` | `date_from=DAILY_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
 | `bing:mtd` | `bing` | `campaign, spend, revenue` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
 | `bing:l30` | `bing` | `campaign, spend, revenue` | `date_preset="last_30d"`, same filter |
-| `bing:daily` | `bing` | `date, spend, revenue` | `date_from=D30_START`, `date_to=TODAY`, same filter |
+| `bing:daily` | `bing` | `date, spend, revenue` | `date_from=DAILY_START`, `date_to=TODAY`, same filter |
 | `facebook:mtd` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
 | `facebook:l30` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_preset="last_30d"`, same filter |
-| `facebook:daily` | `facebook` | `date, spend, action_values_omni_purchase` | `date_from=D30_START`, `date_to=TODAY`, same filter |
+| `facebook:daily` | `facebook` | `date, spend, action_values_omni_purchase` | `date_from=DAILY_START`, `date_to=TODAY`, same filter |
 
 The three `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
 iROAS Daily tab, which is why they carry each platform's conversion-value field too.
