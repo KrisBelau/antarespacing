@@ -203,6 +203,16 @@ levels within a stable mix, and treat a step change in mix as a break in the ser
 rather than a result. Per-campaign daily accuracy would need a campaign x date pull,
 roughly 2,000 rows a day.
 
+**Today's row is a partial day** and is flagged as such. The maturity curve corrects
+booking lag, not an unfinished day: spend and conversions are both incomplete, and
+conversions lag spend within the day, so today reads low for reasons unrelated to
+performance. On 2026-10-15 it read 0.52x on \$1,705 of spend against a ~\$4,700 daily
+norm, while MTD sat at 1.07x.
+
+**A channel pausing or launching is a break in the series,** not a result: it moves the
+blended factor. Bing was paused around 2026-10-06, so comparisons across that date are
+not like for like.
+
 Recent days carry the widest error bars by construction. One day is not a result.
 
 ## Known gaps

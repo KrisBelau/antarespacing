@@ -455,10 +455,15 @@ def iroas_daily_rows(detail, curve, factor):
             s2, v2 = proj.get((day - dt.timedelta(days=k)).isoformat(), (0.0, 0.0))
             r_sp += s2; r_v += v2
         age = (TODAY - day).days
+        # Today is still running: partial spend AND partial booking, and conversions lag
+        # spend within the day too, so the ratio reads low for reasons that have nothing
+        # to do with performance. The maturity curve corrects booking lag, not an
+        # unfinished day. Mark it rather than let someone read it as a drop.
+        note = "in progress - partial day, not comparable" if age == 0 else ""
         rows.append([d, round(sp,2), round(pcv,2), round(mat(age),4),
                      round(pcv*factor/sp, 4) if sp else "",
                      round(mtd_v*factor/mtd_sp, 4) if mtd_sp else "",
-                     round(r_v*factor/r_sp, 4) if r_sp else ""])
+                     round(r_v*factor/r_sp, 4) if r_sp else "", note])
     return rows
 
 def write_iroas_daily(sh, rows, factor):
@@ -469,14 +474,16 @@ def write_iroas_daily(sh, rows, factor):
     try:
         ws = sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=40, cols=8)
+        ws = sh.add_worksheet(title=title, rows=40, cols=9)
     body = [[f"PROJECTED iROAS BY DAY — {TODAY:%B %Y}", "", "", "", "", "", ""],
             ["Date","Spend ($)","Projected Conv Value ($)","Maturity",
-             "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)"]] + rows
+             "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)","Note"]] + rows
     body += [[], [f"Blended incrementality factor applied: {factor:.4f} "
                   f"(L30D conv-value-weighted mean of per-campaign factors, recomputed each run)"],
              ["Each day grossed up by its own age-based maturity from the Config curve."],
-             ["Recent days are the least matured and move the most: read the trend, not a single day."]]
+             ["Recent days are the least matured and move the most: read the trend, not a single day."],
+             ["Today's row is a partial day and is not comparable to completed days."],
+             ["A channel pausing or launching shifts the blended factor: treat that date as a break in the series."]]
     ws.clear()
     ws.update(values=body, range_name="A1", value_input_option="USER_ENTERED")
     return title
