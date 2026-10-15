@@ -25,7 +25,8 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 | `Pacing Tracker` | **F** daily budget — *Meta rows only*, approximated as L30D ÷ 30 (Meta uses CBO/lifetime budgets) |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
-| `Pacing Curve` | **D3:D**(today+2) full month-to-date cumulative spend series, rewritten each run |
+| `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
+| `iROAS Daily` | whole tab, rewritten each run |
 
 Nothing else is touched.
 
@@ -179,6 +180,30 @@ formulas were extended to `3:50`; the routine still read `3:47`, so three campai
 silently missing from the blended iROAS, the projection and the Raise ranking — the
 newest campaigns, the ones most likely to be under watch. `last_campaign_row()` now
 finds the end of the data and every run prints the range it used.
+
+## iROAS Daily
+
+A per-day series for telling whether a change actually moved anything: spend, projected
+conversion value, and iROAS at three horizons — that day, month-to-date, and rolling 30
+days. Rewritten whole each run so the series stays consistent as recent days mature,
+rather than freezing each day at its first and least mature reading.
+
+**Each day is grossed up by its own age-based maturity**, not by the spend-weighted
+multiplier. That multiplier describes an aggregate L30D window; applied to a single day
+it would under-gross yesterday (~75% booked) and over-gross a day from three weeks ago
+(~98% booked). On a daily series that is the difference between seeing a change land and
+seeing the booking curve. Verified against a synthetic flat-1.50x series with simulated
+partial booking: every day reads 1.50, including today at 67.3% booked, where the raw
+number would read 1.01.
+
+**The incrementality factor is a blend, not per-campaign.** Account-level daily data has
+no campaign breakdown, so the routine applies the L30D conv-value-weighted mean of the
+per-campaign factors, recomputed each run. It moves when the channel mix moves — compare
+levels within a stable mix, and treat a step change in mix as a break in the series
+rather than a result. Per-campaign daily accuracy would need a campaign x date pull,
+roughly 2,000 rows a day.
+
+Recent days carry the widest error bars by construction. One day is not a result.
 
 ## Known gaps
 

@@ -42,15 +42,16 @@ Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified agai
 |---|---|---|---|
 | `google_ads:mtd` | `google_ads` | `campaign, spend, conversions_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
 | `google_ads:l30` | `google_ads` | `campaign, spend, conversions_value` | `date_preset="last_30d"`, `accounts=["802-485-7603"]` |
-| `google_ads:daily` | `google_ads` | `date, spend` | `date_from=D30_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
+| `google_ads:daily` | `google_ads` | `date, spend, conversions_value` | `date_from=D30_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
 | `bing:mtd` | `bing` | `campaign, spend, revenue` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
 | `bing:l30` | `bing` | `campaign, spend, revenue` | `date_preset="last_30d"`, same filter |
-| `bing:daily` | `bing` | `date, spend` | `date_from=D30_START`, `date_to=TODAY`, same filter |
+| `bing:daily` | `bing` | `date, spend, revenue` | `date_from=D30_START`, `date_to=TODAY`, same filter |
 | `facebook:mtd` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
 | `facebook:l30` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_preset="last_30d"`, same filter |
-| `facebook:daily` | `facebook` | `date, spend` | `date_from=D30_START`, `date_to=TODAY`, same filter |
+| `facebook:daily` | `facebook` | `date, spend, action_values_omni_purchase` | `date_from=D30_START`, `date_to=TODAY`, same filter |
 
-The three `:daily` pulls feed the month-to-date cumulative series on Pacing Curve.
+The three `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
+iROAS Daily tab, which is why they carry each platform's conversion-value field too.
 Google's also feeds the lag gross-up — Google only, because the maturation curve comes
 from the Google Time Lag report.
 
@@ -89,8 +90,10 @@ The script writes only these cells, exactly as before:
   the daily baseline is approximated as L30D ÷ 30
 - `Config` C65 — spend-weighted lag gross-up
 - `Config` C77 — last-run stamp
-- `Pacing Curve` D3:D(today+2) — the full month-to-date cumulative spend series,
-  rewritten each run so the column self-heals after a missed run or a restatement
+- `Pacing Curve` D3:D(last day of month) — cumulative spend through today, and the
+  remaining days blanked so a previous month's tail cannot linger
+- `iROAS Daily` — rewritten each run: per-day spend, projected conversion value, and
+  iROAS daily / MTD / rolling-30
 
 Everything downstream (lag-adjusted ROAS, iROAS, bands, suggested budgets, guardrail,
 the three queues) is recomputed by the Sheet's own formulas.

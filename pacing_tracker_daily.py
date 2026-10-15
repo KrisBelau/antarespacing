@@ -193,10 +193,30 @@ def pull_daily_spend_all_platforms():
         for r in rows:
             d=r.get("date")
             if d: totals[d]=totals.get(d,0.0)+float(r.get("spend") or 0)
-    add(windsor_get("google_ads",["date","spend"],date_from=start,date_to=end,accounts=[GOOGLE_CID]))
-    add(windsor_get("bing",["date","spend"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]))
-    add(windsor_get("facebook",["date","spend"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]))
+    add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]))
+    add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]))
+    add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]))
     return totals
+
+def pull_daily_detail():
+    """
+    Daily spend AND booked conversion value, summed across platforms -> {date: (spend, cv)}.
+
+    Same window and same cache keys as pull_daily_spend_all_platforms(); the :daily pulls
+    now carry each platform's conversion-value field alongside spend, so no extra request.
+    """
+    start, end = daily_window()
+    out={}
+    def add(rows, cvf):
+        for r in rows:
+            d=r.get("date")
+            if not d: continue
+            sp,cv = out.get(d,(0.0,0.0))
+            out[d]=(sp+float(r.get("spend") or 0), cv+float(r.get(cvf) or 0))
+    add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]),"conversions_value")
+    add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]),"revenue")
+    add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]),"action_values_omni_purchase")
+    return out
 
 # ================================================================ LAG MATH
 def spend_weighted_multiplier(curve, daily_spend):
@@ -382,6 +402,85 @@ def post_slack(text):
         raise RuntimeError(f"Slack post failed: {body.get('error')}")
 
 # ================================================================ MAIN
+def num(x):
+    """Parse a sheet cell that may carry $, commas, % or a trailing x."""
+    try: return float(str(x).replace("$","").replace(",","").replace("%","").replace("x","").strip())
+    except (ValueError, AttributeError): return 0.0
+
+def blended_incrementality_factor(tracker, last_row):
+    """
+    Conversion-value-weighted mean of the per-campaign incrementality factors (col D),
+    weighted by L30D conversion value (col H).
+
+    The daily series is built from account-level daily data, which has no campaign
+    breakdown, so per-campaign factors cannot be applied day by day. This is the honest
+    stand-in: the factor the current mix actually implies, recomputed every run. It
+    moves when the mix moves, so compare iROAS levels within a stable mix and treat a
+    step change in the mix as a break in the series, not a result.
+    """
+    nu=de=0.0
+    for r in tracker.get_values(f"D{DATA_START_ROW}:H{last_row}"):
+        r=(list(r)+[""]*5)[:5]
+        f, cv = num(r[0]), num(r[4])
+        nu += cv*f; de += cv
+    return (nu/de) if de else 0.65
+
+def iroas_daily_rows(detail, curve, factor):
+    """
+    Per-day rows: spend, projected conversion value, and iROAS daily / MTD / rolling-30.
+
+    Each day is grossed up by ITS OWN maturity from the Config curve, by age, not by the
+    spend-weighted multiplier. That multiplier is a single number describing an aggregate
+    L30D window; applying it to an individual day would under-gross yesterday (only ~75%
+    booked) and over-gross a day from three weeks ago (~98% booked). On a daily series
+    that is the difference between seeing a change take effect and seeing the booking
+    curve. Recent days still carry the widest error bars - a one-day move is not a result.
+    """
+    def mat(age): return 1.0 if (age >= 28 or age < 0) else curve.get(age, 1.0)
+    proj = {}
+    for d, (sp, cv) in detail.items():
+        age = (TODAY - dt.date.fromisoformat(d)).days
+        mt = mat(age) or 1.0
+        proj[d] = (sp, cv/mt)
+
+    month_start = TODAY.replace(day=1)
+    rows = []; mtd_sp = mtd_v = 0.0
+    for n in range(1, TODAY.day+1):
+        day = month_start + dt.timedelta(days=n-1)
+        d = day.isoformat()
+        sp, pcv = proj.get(d, (0.0, 0.0))
+        mtd_sp += sp; mtd_v += pcv
+        r_sp = r_v = 0.0
+        for k in range(30):
+            s2, v2 = proj.get((day - dt.timedelta(days=k)).isoformat(), (0.0, 0.0))
+            r_sp += s2; r_v += v2
+        age = (TODAY - day).days
+        rows.append([d, round(sp,2), round(pcv,2), round(mat(age),4),
+                     round(pcv*factor/sp, 4) if sp else "",
+                     round(mtd_v*factor/mtd_sp, 4) if mtd_sp else "",
+                     round(r_v*factor/r_sp, 4) if r_sp else ""])
+    return rows
+
+def write_iroas_daily(sh, rows, factor):
+    """Rewrite the iROAS Daily tab. Recomputed whole each run so the series stays
+    internally consistent as later days mature, rather than freezing each day's
+    first (least mature) reading."""
+    title = "iROAS Daily"
+    try:
+        ws = sh.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows=40, cols=8)
+    body = [[f"PROJECTED iROAS BY DAY — {TODAY:%B %Y}", "", "", "", "", "", ""],
+            ["Date","Spend ($)","Projected Conv Value ($)","Maturity",
+             "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)"]] + rows
+    body += [[], [f"Blended incrementality factor applied: {factor:.4f} "
+                  f"(L30D conv-value-weighted mean of per-campaign factors, recomputed each run)"],
+             ["Each day grossed up by its own age-based maturity from the Config curve."],
+             ["Recent days are the least matured and move the most: read the trend, not a single day."]]
+    ws.clear()
+    ws.update(values=body, range_name="A1", value_input_option="USER_ENTERED")
+    return title
+
 def last_campaign_row(tracker):
     """
     Last row carrying a campaign name. Discovered, never hardcoded: the tracker grew
@@ -518,6 +617,20 @@ def main():
     print(f"[write] Pacing Curve D3:D{len(series_cells)+2} - {TODAY.day} cumulative, "
           f"{len(series_cells)-TODAY.day} blanked"
           + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
+
+    # ---- iROAS by day: daily / MTD / rolling-30, for spotting whether a change landed
+    detail = pull_daily_detail()
+    blend_factor = blended_incrementality_factor(tracker, LAST_ROW)
+    iroas_rows = iroas_daily_rows(detail, curve, blend_factor)
+    if not DRY_RUN:
+        tab = write_iroas_daily(sh, iroas_rows, blend_factor)
+    else:
+        tab = "iROAS Daily"
+    if iroas_rows:
+        last = iroas_rows[-1]
+        print(f"[write] {len(iroas_rows)} rows -> {tab}  "
+              f"(factor {blend_factor:.3f}; today day={last[4]} mtd={last[5]} r30={last[6]})"
+              + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
     if not DRY_RUN: stamp_lastrun(cfg)
 
