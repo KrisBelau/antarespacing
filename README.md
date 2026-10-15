@@ -222,6 +222,20 @@ norm, while MTD sat at 1.07x.
 blended factor. Bing was paused around 2026-10-06, so comparisons across that date are
 not like for like.
 
+### The chart
+
+A line chart sits to the right of the data, rebuilt each run: iROAS by day, iROAS MTD and
+the 1.25x floor on the **left** axis, MTD spend on the **right**. The second axis is not
+decoration — spend runs in tens of thousands against iROAS around 1.0–1.5, so on a shared
+axis the iROAS lines collapse into the baseline and the chart shows nothing.
+
+The floor line is there so "are we above target" is readable at a glance rather than by
+comparing numbers. MTD spend resets to near zero on the 1st, which is correct for a
+month-to-date measure and lets last month's ramp be compared with this one's.
+
+Charts are deleted and re-added each run: `ws.clear()` wipes values but leaves embedded
+objects, so without that they stack up one per day.
+
 Recent days carry the widest error bars by construction. One day is not a result.
 
 ## Known gaps

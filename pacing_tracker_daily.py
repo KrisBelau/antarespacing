@@ -437,7 +437,7 @@ def blended_incrementality_factor(tracker, last_row):
         nu += cv*f; de += cv
     return (nu/de) if de else 0.65
 
-def iroas_daily_rows(detail, curve, factor):
+def iroas_daily_rows(detail, curve, factor, floor=None):
     """
     Per-day rows: spend, projected conversion value, and iROAS daily / MTD / rolling-30.
 
@@ -477,12 +477,61 @@ def iroas_daily_rows(detail, curve, factor):
         # to do with performance. The maturity curve corrects booking lag, not an
         # unfinished day. Mark it rather than let someone read it as a drop.
         note = "in progress - partial day, not comparable" if age == 0 else ""
-        rows.append([d, f"{day:%b %Y}", round(sp,2), round(pcv,2), round(mat(age),4),
+        rows.append([d, f"{day:%b %Y}", round(sp,2), round(mtd_sp,2), round(pcv,2),
+                     round(mat(age),4),
                      round(pcv*factor/sp, 4) if sp else "",
                      round(mtd_v*factor/mtd_sp, 4) if mtd_sp else "",
-                     round(r_v*factor/r_sp, 4) if r_sp else "", note])
+                     round(r_v*factor/r_sp, 4) if r_sp else "",
+                     floor if floor else "", note])
         day += dt.timedelta(days=1)
     return rows
+
+def _rm_charts(sh, sheet_id):
+    """Drop any chart already on the sheet. ws.clear() wipes values but leaves embedded
+    objects, so without this a new chart is added every run and they stack up."""
+    reqs=[]
+    for sheet in sh.fetch_sheet_metadata().get("sheets", []):
+        if sheet.get("properties", {}).get("sheetId") != sheet_id: continue
+        for ch in sheet.get("charts", []) or []:
+            reqs.append({"deleteEmbeddedObject": {"objectId": ch["chartId"]}})
+    if reqs: sh.batch_update({"requests": reqs})
+
+def _add_chart(sh, ws, n_rows):
+    """
+    Line chart: iROAS by day, iROAS MTD and the floor on the left axis, MTD spend on the
+    right. Spend runs in tens of thousands and iROAS around 1.0-1.5, so on a shared axis
+    the iROAS lines would flatten into the baseline and the chart would show nothing.
+    """
+    sid = ws.id
+    def rng(c0, c1):
+        return {"sources":[{"sheetId":sid,"startRowIndex":1,"endRowIndex":2+n_rows,
+                            "startColumnIndex":c0,"endColumnIndex":c1}]}
+    def series(c0, axis, color, dashed=False):
+        d={"series":{"sourceRange":rng(c0,c0+1)},"targetAxis":axis,"color":color}
+        if dashed: d["lineStyle"]={"type":"MEDIUM_DASHED","width":2}
+        return d
+    BLUE={"red":0.12,"green":0.40,"blue":0.75}
+    PALE={"red":0.60,"green":0.73,"blue":0.89}
+    GREY={"red":0.55,"green":0.55,"blue":0.58}
+    AMBER={"red":0.90,"green":0.57,"blue":0.16}
+    sh.batch_update({"requests":[{"addChart":{"chart":{
+        "spec":{
+            "title":"Spend and projected iROAS by day",
+            "basicChart":{
+                "chartType":"LINE","legendPosition":"BOTTOM_LEGEND","headerCount":1,
+                "axis":[{"position":"BOTTOM_AXIS","title":"Date"},
+                        {"position":"LEFT_AXIS","title":"Projected iROAS"},
+                        {"position":"RIGHT_AXIS","title":"MTD spend ($)"}],
+                "domains":[{"domain":{"sourceRange":rng(0,1)}}],
+                "series":[series(6,"LEFT_AXIS",PALE),        # G iROAS (day)
+                          series(7,"LEFT_AXIS",BLUE),        # H iROAS (MTD)
+                          series(9,"LEFT_AXIS",GREY,True),   # J floor
+                          series(3,"RIGHT_AXIS",AMBER)],     # D MTD spend
+            }},
+        "position":{"overlayPosition":{"anchorCell":{
+            "sheetId":sid,"rowIndex":1,"columnIndex":12},
+            "widthPixels":900,"heightPixels":420}}
+    }}}]})
 
 def write_iroas_daily(sh, rows, factor):
     """Rewrite the iROAS Daily tab. Recomputed whole each run so the series stays
@@ -492,12 +541,12 @@ def write_iroas_daily(sh, rows, factor):
     try:
         ws = sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=100, cols=10)
+        ws = sh.add_worksheet(title=title, rows=100, cols=12)
     prev = (TODAY.replace(day=1) - dt.timedelta(days=1))
     body = [[f"PROJECTED iROAS BY DAY — {prev:%B %Y} and {TODAY:%B %Y} to date",
              "", "", "", "", "", "", ""],
-            ["Date","Month","Spend ($)","Projected Conv Value ($)","Maturity",
-             "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)","Note"]] + rows
+            ["Date","Month","Spend ($)","MTD Spend ($)","Projected Conv Value ($)","Maturity",
+             "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)","Floor","Note"]] + rows
     body += [[], [f"Blended incrementality factor applied: {factor:.4f} "
                   f"(L30D conv-value-weighted mean of per-campaign factors, recomputed each run)"],
              ["Each day grossed up by its own age-based maturity from the Config curve."],
@@ -505,8 +554,13 @@ def write_iroas_daily(sh, rows, factor):
              ["Recent days are the least matured and move the most: read the trend, not a single day."],
              ["Today's row is a partial day and is not comparable to completed days."],
              ["A channel pausing or launching shifts the blended factor: treat that date as a break in the series."]]
+    _rm_charts(sh, ws.id)
+    # The chart anchors to the right of the data, so the grid has to be wide enough to
+    # hold that cell - an anchor past the last column is rejected outright.
+    ws.resize(rows=max(100, len(body) + 12), cols=26)
     ws.clear()
     ws.update(values=body, range_name="A1", value_input_option="USER_ENTERED")
+    _add_chart(sh, ws, len(rows))
     return title
 
 def last_campaign_row(tracker):
@@ -649,7 +703,7 @@ def main():
     # ---- iROAS by day: daily / MTD / rolling-30, for spotting whether a change landed
     detail = pull_daily_detail()
     blend_factor = blended_incrementality_factor(tracker, LAST_ROW)
-    iroas_rows = iroas_daily_rows(detail, curve, blend_factor)
+    iroas_rows = iroas_daily_rows(detail, curve, blend_factor, floor=num(cfg.cell(6,3).value))
     if not DRY_RUN:
         tab = write_iroas_daily(sh, iroas_rows, blend_factor)
     else:
@@ -657,7 +711,7 @@ def main():
     if iroas_rows:
         last = iroas_rows[-1]
         print(f"[write] {len(iroas_rows)} rows -> {tab}  "
-              f"(factor {blend_factor:.3f}; today day={last[4]} mtd={last[5]} r30={last[6]})"
+              f"(factor {blend_factor:.3f}; today day={last[6]} mtd={last[7]} r30={last[8]})"
               + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
     if not DRY_RUN: stamp_lastrun(cfg)
