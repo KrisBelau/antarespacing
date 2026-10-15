@@ -72,13 +72,19 @@ def daily_window():
     One date window serving both daily pulls, so they share a cache key without
     disagreeing about what it holds.
 
-    Two needs: the lag gross-up wants the trailing 30 days, the pacing curve wants
-    month-start..today. Neither is a superset of the other - on the 1st the month is
-    one day, and from day 31 a trailing-30d window no longer reaches the 1st. Take the
-    union. Consumers narrow it themselves: the multiplier filters by day age, the curve
-    looks up only this month's dates.
+    Three needs now: the lag gross-up wants the trailing 30 days, the pacing curve wants
+    month-start..today, and iROAS Daily shows last month plus this month to date - which
+    needs a further 29-day lead-in so the rolling-30 column is complete on the 1st of
+    last month rather than ramping up from nothing.
+
+    Take the union. Every consumer narrows it itself: the multiplier enforces its own
+    30-day bound, the curve looks up only this month's dates, and iROAS Daily emits only
+    the two months it displays.
     """
-    return min(TODAY.replace(day=1), TODAY - dt.timedelta(days=29)).isoformat(), TODAY.isoformat()
+    prev_month_start = TODAY.replace(day=1) - dt.timedelta(days=1)
+    prev_month_start = prev_month_start.replace(day=1)
+    start = min(prev_month_start - dt.timedelta(days=29), TODAY - dt.timedelta(days=29))
+    return start.isoformat(), TODAY.isoformat()
 
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None):
@@ -221,15 +227,21 @@ def pull_daily_detail():
 # ================================================================ LAG MATH
 def spend_weighted_multiplier(curve, daily_spend):
     """
-    gross-up = sum(spend) / sum(spend * maturity(age)).
+    gross-up = sum(spend) / sum(spend * maturity(age)), over the trailing 30 days only.
     Weighting each day's maturity by that day's spend self-corrects for spend ramps:
     when recent (under-matured) days carry more spend, the undercount - and the gross-up - rises.
+
+    The 30-day bound is enforced here, not left to the caller's window. daily_window()
+    reaches further back so the iROAS Daily tab can show last month, and every day past
+    day 27 is fully matured - it would add equally to numerator and denominator and drag
+    the gross-up toward 1.0, silently deflating every iROAS figure downstream.
     """
     def mat(age): return 1.0 if (age>=28 or age<0) else curve.get(age,1.0)
-    num=sum(daily_spend.values()); den=0.0
+    num=den=0.0
     for d,sp in daily_spend.items():
         age=(TODAY-dt.date.fromisoformat(d)).days
-        den+=sp*mat(age)
+        if age < 0 or age >= 30: continue
+        num+=sp; den+=sp*mat(age)
     return (num/den) if den else 1.0
 
 # ================================================================ CURVE (from Time Lag export)
@@ -443,15 +455,20 @@ def iroas_daily_rows(detail, curve, factor):
         mt = mat(age) or 1.0
         proj[d] = (sp, cv/mt)
 
-    month_start = TODAY.replace(day=1)
-    rows = []; mtd_sp = mtd_v = 0.0
-    for n in range(1, TODAY.day+1):
-        day = month_start + dt.timedelta(days=n-1)
+    this_start = TODAY.replace(day=1)
+    prev_start = (this_start - dt.timedelta(days=1)).replace(day=1)
+
+    rows = []; mtd_sp = mtd_v = 0.0; cur_month = None
+    day = prev_start
+    while day <= TODAY:
+        if day.month != cur_month:          # month-to-date restarts each month
+            cur_month = day.month
+            mtd_sp = mtd_v = 0.0
         d = day.isoformat()
         sp, pcv = proj.get(d, (0.0, 0.0))
         mtd_sp += sp; mtd_v += pcv
         r_sp = r_v = 0.0
-        for k in range(30):
+        for k in range(30):                 # rolling 30 runs straight through the boundary
             s2, v2 = proj.get((day - dt.timedelta(days=k)).isoformat(), (0.0, 0.0))
             r_sp += s2; r_v += v2
         age = (TODAY - day).days
@@ -460,10 +477,11 @@ def iroas_daily_rows(detail, curve, factor):
         # to do with performance. The maturity curve corrects booking lag, not an
         # unfinished day. Mark it rather than let someone read it as a drop.
         note = "in progress - partial day, not comparable" if age == 0 else ""
-        rows.append([d, round(sp,2), round(pcv,2), round(mat(age),4),
+        rows.append([d, f"{day:%b %Y}", round(sp,2), round(pcv,2), round(mat(age),4),
                      round(pcv*factor/sp, 4) if sp else "",
                      round(mtd_v*factor/mtd_sp, 4) if mtd_sp else "",
                      round(r_v*factor/r_sp, 4) if r_sp else "", note])
+        day += dt.timedelta(days=1)
     return rows
 
 def write_iroas_daily(sh, rows, factor):
@@ -474,13 +492,16 @@ def write_iroas_daily(sh, rows, factor):
     try:
         ws = sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=40, cols=9)
-    body = [[f"PROJECTED iROAS BY DAY — {TODAY:%B %Y}", "", "", "", "", "", ""],
-            ["Date","Spend ($)","Projected Conv Value ($)","Maturity",
+        ws = sh.add_worksheet(title=title, rows=100, cols=10)
+    prev = (TODAY.replace(day=1) - dt.timedelta(days=1))
+    body = [[f"PROJECTED iROAS BY DAY — {prev:%B %Y} and {TODAY:%B %Y} to date",
+             "", "", "", "", "", "", ""],
+            ["Date","Month","Spend ($)","Projected Conv Value ($)","Maturity",
              "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)","Note"]] + rows
     body += [[], [f"Blended incrementality factor applied: {factor:.4f} "
                   f"(L30D conv-value-weighted mean of per-campaign factors, recomputed each run)"],
              ["Each day grossed up by its own age-based maturity from the Config curve."],
+             ["iROAS (MTD) restarts on the 1st of each month; iROAS (rolling 30d) runs continuously."],
              ["Recent days are the least matured and move the most: read the trend, not a single day."],
              ["Today's row is a partial day and is not comparable to completed days."],
              ["A channel pausing or launching shifts the blended factor: treat that date as a break in the series."]]

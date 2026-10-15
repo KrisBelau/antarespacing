@@ -185,8 +185,17 @@ finds the end of the data and every run prints the range it used.
 
 A per-day series for telling whether a change actually moved anything: spend, projected
 conversion value, and iROAS at three horizons — that day, month-to-date, and rolling 30
-days. Rewritten whole each run so the series stays consistent as recent days mature,
-rather than freezing each day at its first and least mature reading.
+days. Covers **last month plus this month to date**, so a change has a before to be
+compared against. `iROAS (MTD)` restarts on the 1st; `iROAS (rolling 30d)` runs
+continuously across the boundary. Rewritten whole each run so the series stays consistent
+as recent days mature, rather than freezing each day at its first and least mature reading.
+
+Showing two months means the daily window reaches back further — to the 1st of last month
+minus 29 days, so the rolling-30 column is complete on day one rather than ramping up from
+nothing. `spend_weighted_multiplier` therefore enforces its own 30-day bound rather than
+trusting the window: every day past 27 is fully matured and would add equally to numerator
+and denominator, dragging the gross-up toward 1.0 and silently deflating every iROAS figure
+downstream.
 
 **Each day is grossed up by its own age-based maturity**, not by the spend-weighted
 multiplier. That multiplier describes an aggregate L30D window; applied to a single day
