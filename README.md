@@ -160,6 +160,26 @@ The routine now refuses to run on a mismatch. To roll over:
 `PACING_ALLOW_MONTH_MISMATCH=1` overrides the guard; only use it for a run you have
 reasoned about.
 
+## Why the curve showed future actuals (fixed 2026-10-15)
+
+`mtd_series_cells` wrote days 1..today and left the rest of the column alone, so last
+month's cumulative values sat in the future rows reading as "actuals" far above the
+projection, until the new month's days overwrote them one at a time. A shorter previous
+month never overwrote its own tail at all: September ended at day 30, so going into
+October days 16-30 still held September while days 1-15 were October — a $53,834 jump
+between day 15 and day 16.
+
+The routine now writes every day of the month each run, blanking those after today, so
+the column cannot carry anything stale.
+
+## Row bounds are discovered, not hardcoded
+
+The tracker grew from 45 campaigns (ending row 47) to 48 (row 50). The sheet's own
+formulas were extended to `3:50`; the routine still read `3:47`, so three campaigns were
+silently missing from the blended iROAS, the projection and the Raise ranking — the
+newest campaigns, the ones most likely to be under watch. `last_campaign_row()` now
+finds the end of the data and every run prints the range it used.
+
 ## Known gaps
 
 - **Campaigns are matched by exact name.** Rename a campaign on-platform and its row

@@ -36,7 +36,7 @@ Confidence notes (read before trusting output):
     understates its own tail because those conversions have not finished booking yet.
 """
 
-import os, csv, glob, json, re, datetime as dt
+import os, csv, glob, json, re, calendar, datetime as dt
 import gspread
 import requests
 from google.oauth2.service_account import Credentials
@@ -326,12 +326,21 @@ def mtd_series_cells(daily_all):
     caller surfaces them rather than writing a silently wrong series.
     """
     month_start=TODAY.replace(day=1)
+    days_in_month=calendar.monthrange(TODAY.year, TODAY.month)[1]
     cum=0.0; cells=[]; missing=[]
-    for n in range(1, TODAY.day+1):
-        d=(month_start+dt.timedelta(days=n-1)).isoformat()
-        if d not in daily_all: missing.append(d)
-        cum+=daily_all.get(d,0.0)
-        cells.append(gspread.Cell(n+2,4,round(cum,2)))
+    for n in range(1, days_in_month+1):
+        if n <= TODAY.day:
+            d=(month_start+dt.timedelta(days=n-1)).isoformat()
+            if d not in daily_all: missing.append(d)
+            cum+=daily_all.get(d,0.0)
+            cells.append(gspread.Cell(n+2,4,round(cum,2)))
+        else:
+            # Blank every remaining day of the month. Writing only days 1..today leaves
+            # whatever was there before, so a previous month's cumulative values sit in
+            # the future rows reading as "actuals" far above the projection until the
+            # new month's days overwrite them one at a time. A shorter previous month
+            # (Sep 30 -> Oct 31) never overwrites its own tail at all.
+            cells.append(gspread.Cell(n+2,4,""))
     return cells, cum, missing
 
 def stamp_lastrun(cfg):
@@ -373,6 +382,18 @@ def post_slack(text):
         raise RuntimeError(f"Slack post failed: {body.get('error')}")
 
 # ================================================================ MAIN
+def last_campaign_row(tracker):
+    """
+    Last row carrying a campaign name. Discovered, never hardcoded: the tracker grew
+    from 45 campaigns (ending row 47) to 48 (row 50) without the routine noticing, and
+    a hardcoded bound silently drops the newest campaigns from every figure derived
+    from it - which are exactly the campaigns someone just added and wants to watch.
+    """
+    names = tracker.col_values(COL["campaign"])
+    last = max((i for i, n in enumerate(names, 1) if i >= DATA_START_ROW and n.strip()),
+               default=DATA_START_ROW - 1)
+    return last
+
 def sheet_reporting_month(cfg):
     """The month Config!C11 says the sheet is tracking, or None if unparseable."""
     raw = cfg.get_values("C11", value_render_option="UNFORMATTED_VALUE")
@@ -412,6 +433,10 @@ def main():
     # while days-elapsed, month-fraction and the curve's date labels still describe the
     # old one, and day N of the new month silently overwrites day N of the old.
     # Refuse rather than corrupt. Override only to force a run you have reasoned about.
+    LAST_ROW = last_campaign_row(tracker)
+    print(f"[rows] campaigns occupy {DATA_START_ROW}..{LAST_ROW} "
+          f"({LAST_ROW-DATA_START_ROW+1} rows)")
+
     reporting_month = sheet_reporting_month(cfg)
     if reporting_month is None:
         raise RuntimeError("Cannot read Config!C11 (reporting month); refusing to write.")
@@ -490,7 +515,8 @@ def main():
 
     if not DRY_RUN:
         curve_ws.update_cells(series_cells, value_input_option="USER_ENTERED")
-    print(f"[write] {len(series_cells)} cumulative cells -> Pacing Curve D3:D{len(series_cells)+2}"
+    print(f"[write] Pacing Curve D3:D{len(series_cells)+2} - {TODAY.day} cumulative, "
+          f"{len(series_cells)-TODAY.day} blanked"
           + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
     if not DRY_RUN: stamp_lastrun(cfg)
@@ -513,7 +539,7 @@ def main():
         Projected MTD spend extrapolates actual spend over the month on days elapsed,
         the same basis as the per-campaign Projected EOM column.
         """
-        rows = tracker.get_values(f"D{DATA_START_ROW}:H47")
+        rows = tracker.get_values(f"D{DATA_START_ROW}:H{LAST_ROW}")
         num = den = 0.0
         for r in rows:
             r = (r + [""]*5)[:5]
@@ -566,7 +592,7 @@ def main():
     # iROAS per campaign, joined from Pacing Tracker col J by campaign name (col B).
     # The Suggestions Tracker does not carry iROAS, and the Raise queue ranks on it.
     iroas_by_campaign = {}
-    for r in tracker.get_values(f"B{DATA_START_ROW}:J47"):
+    for r in tracker.get_values(f"B{DATA_START_ROW}:J{LAST_ROW}"):
         r = (list(r) + [""]*9)[:9]
         if r[0]:
             iroas_by_campaign[r[0]] = _n(r[8])
