@@ -222,19 +222,36 @@ norm, while MTD sat at 1.07x.
 blended factor. Bing was paused around 2026-10-06, so comparisons across that date are
 not like for like.
 
-### The chart
+### The charts
 
-A line chart sits to the right of the data, rebuilt each run: iROAS by day, iROAS MTD and
-the 1.25x floor on the **left** axis, MTD spend on the **right**. The second axis is not
-decoration — spend runs in tens of thousands against iROAS around 1.0–1.5, so on a shared
-axis the iROAS lines collapse into the baseline and the chart shows nothing.
+**Two charts, one per month**, stacked down the right of the data and rebuilt each run:
+last month complete, this month to date. Each plots iROAS by day, iROAS MTD and the 1.25x
+floor on the **left** axis and **daily** spend on the **right**.
+
+The second axis is not decoration — spend runs in thousands against iROAS around 1.0–1.5,
+so on a shared axis the iROAS lines collapse into the baseline and the chart shows nothing.
+Daily spend rather than MTD: the cumulative line only ever climbs, so it reads as a ramp
+whatever happens underneath it. Daily spend shows the days a change actually landed on.
 
 The floor line is there so "are we above target" is readable at a glance rather than by
-comparing numbers. MTD spend resets to near zero on the 1st, which is correct for a
-month-to-date measure and lets last month's ramp be compared with this one's.
+comparing numbers.
+
+Three API constraints shape how the tab is laid out. They are not obvious and are easy to
+reintroduce:
+
+- **Each chart's range must be contiguous and carry its own header.** The API rejects a
+  series stitched from a distant header row plus a far-off data block. That is why each
+  month is written as its own labelled section with its own repeated header row, rather
+  than as one long table with a single header.
+- **An anchor cell past the last column is rejected outright.** The charts anchor at
+  column 12, so the grid is resized to 26 columns before they are added.
+- **A bare month label gets parsed as a date.** Under `USER_ENTERED`, Sheets coerces
+  `"Sep 2026"` into `2026-09-01` and renders it as a date, silently replacing the section
+  heading. Labels are written as `September 2026 (complete)` /
+  `October 2026 (to date)`; the parenthetical is what keeps them text.
 
 Charts are deleted and re-added each run: `ws.clear()` wipes values but leaves embedded
-objects, so without that they stack up one per day.
+objects, so without that they stack up two per day.
 
 Recent days carry the widest error bars by construction. One day is not a result.
 

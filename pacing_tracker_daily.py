@@ -496,18 +496,25 @@ def _rm_charts(sh, sheet_id):
             reqs.append({"deleteEmbeddedObject": {"objectId": ch["chartId"]}})
     if reqs: sh.batch_update({"requests": reqs})
 
-def _add_chart(sh, ws, n_rows):
+def _add_chart(sh, ws, r0, r1, title, anchor_row):
     """
-    Line chart: iROAS by day, iROAS MTD and the floor on the left axis, MTD spend on the
-    right. Spend runs in tens of thousands and iROAS around 1.0-1.5, so on a shared axis
-    the iROAS lines would flatten into the baseline and the chart would show nothing.
+    One line chart over a single contiguous block: header row at r0, data to r1
+    (0-based, end exclusive). iROAS by day, iROAS MTD and the floor on the left axis,
+    daily spend on the right.
+
+    Spend runs in thousands against iROAS around 1.0-1.5, so on a shared axis the iROAS
+    lines collapse into the baseline and the chart shows nothing. Hence the second axis.
+
+    The range must be contiguous and include its own header: the API rejects a series
+    stitched from a distant header row plus a data block, which is why each month is
+    written as its own labelled section with its own header rather than one long table.
     """
     sid = ws.id
-    def rng(c0, c1):
-        return {"sources":[{"sheetId":sid,"startRowIndex":1,"endRowIndex":2+n_rows,
-                            "startColumnIndex":c0,"endColumnIndex":c1}]}
+    def rng(c0):
+        return {"sources":[{"sheetId":sid,"startRowIndex":r0,"endRowIndex":r1,
+                            "startColumnIndex":c0,"endColumnIndex":c0+1}]}
     def series(c0, axis, color, dashed=False):
-        d={"series":{"sourceRange":rng(c0,c0+1)},"targetAxis":axis,"color":color}
+        d={"series":{"sourceRange":rng(c0)},"targetAxis":axis,"color":color}
         if dashed: d["lineStyle"]={"type":"MEDIUM_DASHED","width":2}
         return d
     BLUE={"red":0.12,"green":0.40,"blue":0.75}
@@ -516,51 +523,75 @@ def _add_chart(sh, ws, n_rows):
     AMBER={"red":0.90,"green":0.57,"blue":0.16}
     sh.batch_update({"requests":[{"addChart":{"chart":{
         "spec":{
-            "title":"Spend and projected iROAS by day",
+            "title":title,
             "basicChart":{
                 "chartType":"LINE","legendPosition":"BOTTOM_LEGEND","headerCount":1,
                 "axis":[{"position":"BOTTOM_AXIS","title":"Date"},
                         {"position":"LEFT_AXIS","title":"Projected iROAS"},
-                        {"position":"RIGHT_AXIS","title":"MTD spend ($)"}],
-                "domains":[{"domain":{"sourceRange":rng(0,1)}}],
+                        {"position":"RIGHT_AXIS","title":"Daily spend ($)"}],
+                "domains":[{"domain":{"sourceRange":rng(0)}}],
                 "series":[series(6,"LEFT_AXIS",PALE),        # G iROAS (day)
                           series(7,"LEFT_AXIS",BLUE),        # H iROAS (MTD)
                           series(9,"LEFT_AXIS",GREY,True),   # J floor
-                          series(3,"RIGHT_AXIS",AMBER)],     # D MTD spend
+                          series(2,"RIGHT_AXIS",AMBER)],     # C daily spend
             }},
         "position":{"overlayPosition":{"anchorCell":{
-            "sheetId":sid,"rowIndex":1,"columnIndex":12},
+            "sheetId":sid,"rowIndex":anchor_row,"columnIndex":12},
             "widthPixels":900,"heightPixels":420}}
     }}}]})
 
 def write_iroas_daily(sh, rows, factor):
-    """Rewrite the iROAS Daily tab. Recomputed whole each run so the series stays
-    internally consistent as later days mature, rather than freezing each day's
-    first (least mature) reading."""
+    """
+    Rewrite the iROAS Daily tab as one labelled section per month, each with its own
+    header and its own chart. Recomputed whole each run so the series stays consistent
+    as recent days mature, rather than freezing each day at its first, least mature read.
+    """
     title = "iROAS Daily"
     try:
         ws = sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=100, cols=12)
+        ws = sh.add_worksheet(title=title, rows=140, cols=26)
     prev = (TODAY.replace(day=1) - dt.timedelta(days=1))
-    body = [[f"PROJECTED iROAS BY DAY — {prev:%B %Y} and {TODAY:%B %Y} to date",
-             "", "", "", "", "", "", ""],
-            ["Date","Month","Spend ($)","MTD Spend ($)","Projected Conv Value ($)","Maturity",
-             "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)","Floor","Note"]] + rows
-    body += [[], [f"Blended incrementality factor applied: {factor:.4f} "
-                  f"(L30D conv-value-weighted mean of per-campaign factors, recomputed each run)"],
+    HDR = ["Date","Month","Spend ($)","MTD Spend ($)","Projected Conv Value ($)","Maturity",
+           "iROAS (day)","iROAS (MTD)","iROAS (rolling 30d)","Floor","Note"]
+
+    first_month = rows[0][1] if rows else ""
+    prev_rows = [r for r in rows if r[1] == first_month]
+    cur_rows  = [r for r in rows if r[1] != first_month]
+
+    body = [[f"PROJECTED iROAS BY DAY — {prev:%B %Y} and {TODAY:%B %Y} to date"], []]
+    blocks = []
+    def add_block(label, data):
+        if not data: return
+        body.append([label])
+        body.append(list(HDR))
+        blocks.append((len(body) - 1, len(data), label))   # header row index, n, label
+        body.extend(data)
+        body.append([])
+    # Labels must not be parseable as dates. USER_ENTERED makes Sheets coerce a bare
+    # "Sep 2026" into 2026-09-01 and render it as a date, silently replacing the section
+    # heading. The parenthetical keeps it text.
+    add_block(f"{prev:%B %Y} (complete)", prev_rows)
+    add_block(f"{TODAY:%B %Y} (to date)", cur_rows)
+
+    body += [[f"Blended incrementality factor applied: {factor:.4f} "
+              f"(L30D conv-value-weighted mean of per-campaign factors, recomputed each run)"],
              ["Each day grossed up by its own age-based maturity from the Config curve."],
              ["iROAS (MTD) restarts on the 1st of each month; iROAS (rolling 30d) runs continuously."],
              ["Recent days are the least matured and move the most: read the trend, not a single day."],
              ["Today's row is a partial day and is not comparable to completed days."],
              ["A channel pausing or launching shifts the blended factor: treat that date as a break in the series."]]
+
     _rm_charts(sh, ws.id)
-    # The chart anchors to the right of the data, so the grid has to be wide enough to
+    # The charts anchor to the right of the data, so the grid has to be wide enough to
     # hold that cell - an anchor past the last column is rejected outright.
-    ws.resize(rows=max(100, len(body) + 12), cols=26)
+    ws.resize(rows=max(140, len(body) + 12), cols=26)
     ws.clear()
     ws.update(values=body, range_name="A1", value_input_option="USER_ENTERED")
-    _add_chart(sh, ws, len(rows))
+
+    for i, (hdr_idx, n, label) in enumerate(blocks):
+        _add_chart(sh, ws, hdr_idx, hdr_idx + 1 + n,
+                   f"{label} — spend and projected iROAS by day", 1 + i*23)
     return title
 
 def last_campaign_row(tracker):
