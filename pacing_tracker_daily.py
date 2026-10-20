@@ -718,7 +718,7 @@ def main():
         cells.append(gspread.Cell(wrow,COL["mtd"],   round(d["mtd_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30sp"], round(d["l30_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30cv"], round(d["l30_cv"],2)))
-        if d["platform"]=="Meta Ads":
+        if d["platform"] in ("Meta Ads","Reddit Ads"):   # lifetime/CBO budgets: baseline = L30D/30
             cells.append(gspread.Cell(wrow,COL["daily"], round(d["l30_spend"]/30,2)))
 
     # Reconciliation: a campaign renamed on-platform silently stops updating, because
