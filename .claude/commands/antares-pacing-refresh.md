@@ -25,6 +25,7 @@ entirely** — no Sheet writes, no Slack post.
 | Google Ads | connector `google_ads`, account `802-485-7603` |
 | Microsoft Ads | connector `bing`, `account_name` = `Antares Adwords` |
 | Meta Ads | connector `facebook`, `account_name` = `Antares Ads` |
+| Reddit Ads | connector `reddit`, account `a2_esoyaxwp5glg` (`antaresautotune`). Always pass `accounts`: an unscoped Reddit pull hits other clients' accounts and returns a 401 |
 
 ## Step 1 — resolve dates
 
@@ -44,9 +45,9 @@ on the 1st of last month instead of ramping up from nothing. The routine's
 `daily_window()` computes exactly this union; feeding it a shorter window silently
 truncates last month. Every consumer narrows the window itself.
 
-## Step 2 — pull the nine Windsor datasets
+## Step 2 — pull the twelve Windsor datasets
 
-Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified against
+Call `mcp__Windsor_ai__get_data` twelve times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
 `action_values_omni_purchase`, *not* `conversions_value`.
 
@@ -61,13 +62,16 @@ Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified agai
 | `facebook:mtd` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
 | `facebook:l30` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_preset="last_30d"`, same filter |
 | `facebook:daily` | `facebook` | `date, spend, action_values_omni_purchase` | `date_from=DAILY_START`, `date_to=TODAY`, same filter |
+| `reddit:mtd` | `reddit` | `campaign, spend, purchase_total_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["a2_esoyaxwp5glg"]` |
+| `reddit:l30` | `reddit` | `campaign, spend, purchase_total_value` | `date_preset="last_30d"`, same account |
+| `reddit:daily` | `reddit` | `date, spend, purchase_total_value` | `date_from=DAILY_START`, `date_to=TODAY`, same account |
 
-The three `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
+The four `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
 iROAS Daily tab, which is why they carry each platform's conversion-value field too.
 Google's also feeds the lag gross-up — Google only, because the maturation curve comes
 from the Google Time Lag report.
 
-Write all nine result arrays into one JSON file keyed exactly as above:
+Write all twelve result arrays into one JSON file keyed exactly as above:
 
 ```json
 { "google_ads:mtd": [ {...}, ... ], "google_ads:l30": [ ... ], ... }
@@ -78,7 +82,7 @@ Save it to `/tmp/windsor_cache.json`.
 **Sanity-check before continuing.** If any of these fail, stop and report rather than
 writing partial data to a live client sheet:
 
-- all nine keys present and non-empty
+- all twelve keys present and non-empty
 - each `:daily` key has ~30 rows, one per date
 - MTD spend totals are plausible (Google MTD has been running ~$85–95k mid-month)
 

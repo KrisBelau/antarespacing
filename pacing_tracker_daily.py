@@ -6,10 +6,11 @@ Objective the sheet encodes: MAXIMIZE SPEND while blended incremental ROAS >= fl
 Budget is a guardrail, not the target.
 
 What this routine does each morning:
-  1. Pull MTD + L30D spend/conv-value per campaign from Windsor.ai for all 3 platforms
+  1. Pull MTD + L30D spend/conv-value per campaign from Windsor.ai for all 4 platforms
        - google_ads   (account 802-485-7603)  conv field: conversions_value
        - bing         (Antares Adwords)        conv field: revenue
        - facebook     (Antares Ads)            conv field: action_values_omni_purchase
+       - reddit       (antaresautotune)        conv field: purchase_total_value
   2. Pull the trailing-30d DAILY spend series (Google) to compute the SPEND-WEIGHTED
      conversion-lag gross-up multiplier from the maturation curve in the sheet.
   3. Write per-campaign raw data into the Pacing Tracker tab (cols E,F,G,H). The sheet's
@@ -56,6 +57,7 @@ DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", 
 GOOGLE_CID   = "802-485-7603"
 BING_ACCOUNT = "Antares Adwords"     # account_name filter value
 META_ACCOUNT = "Antares Ads"
+REDDIT_ACCOUNT_ID = "a2_esoyaxwp5glg"   # Windsor account "antaresautotune"; filtered by id, not name
 
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
@@ -89,12 +91,13 @@ def daily_window():
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None):
     """
-    Stable name for one Windsor pull. The nine calls this routine makes are fully
+    Stable name for one Windsor pull. The twelve calls this routine makes are fully
     distinguished by connector + window, so the slash command can populate the cache
     without reconstructing argument tuples:
         google_ads:mtd  google_ads:l30  google_ads:daily
         bing:mtd        bing:l30        bing:daily
         facebook:mtd    facebook:l30    facebook:daily
+        reddit:mtd      reddit:l30      reddit:daily
     """
     if date_preset:            window = "l30"
     elif "date" in fields:     window = "daily"
@@ -116,6 +119,7 @@ def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=Non
     Field names are verified live against get_fields (2026-08-12):
       google_ads: spend, conversions_value | bing: spend, revenue |
       facebook: spend, action_values_omni_purchase   (NOT conversions_value)
+    Reddit verified against get_fields 2026-10-20: spend, purchase_total_value.
     """
     key = windsor_cache_key(connector, fields, date_preset)
 
@@ -145,7 +149,7 @@ def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=Non
     return r.json().get("data", [])
 
 def pull_platform_mtd_and_l30():
-    """Return {campaign: {platform, mtd_spend, mtd_cv, l30_spend, l30_cv}} across all 3 platforms."""
+    """Return {campaign: {platform, mtd_spend, mtd_cv, l30_spend, l30_cv}} across all 4 platforms."""
     m = TODAY.replace(day=1).isoformat(); t = TODAY.isoformat()
     out = {}
     def merge(rows, plat, spend_f, cv_f, window):
@@ -168,6 +172,10 @@ def pull_platform_mtd_and_l30():
           "Meta Ads","spend","action_values_omni_purchase","mtd")
     merge(windsor_get("facebook",["campaign","spend","action_values_omni_purchase"],date_preset="last_30d",filters=[["account_name","eq",META_ACCOUNT]]),
           "Meta Ads","spend","action_values_omni_purchase","l30")
+    merge(windsor_get("reddit",["campaign","spend","purchase_total_value"],date_from=m,date_to=t,accounts=[REDDIT_ACCOUNT_ID]),
+          "Reddit Ads","spend","purchase_total_value","mtd")
+    merge(windsor_get("reddit",["campaign","spend","purchase_total_value"],date_preset="last_30d",accounts=[REDDIT_ACCOUNT_ID]),
+          "Reddit Ads","spend","purchase_total_value","l30")
     return out
 
 def pull_google_daily_spend():
@@ -182,7 +190,7 @@ def pull_google_daily_spend():
 
 def pull_daily_spend_all_platforms():
     """
-    Month-to-date daily spend summed across all three platforms -> {date: spend}.
+    Month-to-date daily spend summed across all four platforms -> {date: spend}.
 
     Feeds the month-to-date cumulative series on Pacing Curve. Separate from
     pull_google_daily_spend() in two ways: that one is Google-only on purpose (see
@@ -202,6 +210,7 @@ def pull_daily_spend_all_platforms():
     add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]))
     add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]))
     add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]))
+    add(windsor_get("reddit",["date","spend","purchase_total_value"],date_from=start,date_to=end,accounts=[REDDIT_ACCOUNT_ID]))
     return totals
 
 def pull_daily_detail():
@@ -222,6 +231,7 @@ def pull_daily_detail():
     add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]),"conversions_value")
     add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]),"revenue")
     add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]),"action_values_omni_purchase")
+    add(windsor_get("reddit",["date","spend","purchase_total_value"],date_from=start,date_to=end,accounts=[REDDIT_ACCOUNT_ID]),"purchase_total_value")
     return out
 
 # ================================================================ LAG MATH
@@ -687,7 +697,7 @@ def main():
 
     data=pull_platform_mtd_and_l30()
     daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
-    daily_all=pull_daily_spend_all_platforms() # all three  -> pacing curve series
+    daily_all=pull_daily_spend_all_platforms() # all four   -> pacing curve series
 
     new_curve=refresh_curve_from_timelag()
     if new_curve:

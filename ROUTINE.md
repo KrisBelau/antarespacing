@@ -40,7 +40,7 @@ weekends, so the curve simply catches up on Monday.
 Daily Antares / AutoTune paid-media pacing refresh.
 
 The authoritative procedure is `.claude/commands/antares-pacing-refresh.md` in this repo
-(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the nine
+(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the twelve
 Windsor.ai pulls, the run command, and the Slack post.
 
 PREREQUISITE the command file does not cover: the Google service-account key is
@@ -59,7 +59,7 @@ private, non-shared channel — #antares-pacing (C0BPYHZUH9S) is an external Sla
 Connect channel and rejects bot-posted messages.
 
 STOP AND DO NOT POST if any of these are true — report the failure instead:
-  - any of the nine Windsor pulls returns empty
+  - any of the twelve Windsor pulls returns empty
   - the Sheet is unreachable or the service account gets a 403
   - fewer than ~40 of the 45 campaign rows match by name
   - the run log shows a drift flag above 3% on the MTD cross-check
