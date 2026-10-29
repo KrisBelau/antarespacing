@@ -56,6 +56,7 @@ DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", 
 GOOGLE_CID   = "802-485-7603"
 BING_ACCOUNT = "Antares Adwords"     # account_name filter value
 META_ACCOUNT = "Antares Ads"
+REDDIT_ACCOUNT = "a2_esoyaxwp5glg"   # account id (antaresautotune); conv field: purchase_total_value
 
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
@@ -95,6 +96,7 @@ def windsor_cache_key(connector, fields, date_preset=None):
         google_ads:mtd  google_ads:l30  google_ads:daily
         bing:mtd        bing:l30        bing:daily
         facebook:mtd    facebook:l30    facebook:daily
+        reddit:mtd      reddit:l30      reddit:daily
     """
     if date_preset:            window = "l30"
     elif "date" in fields:     window = "daily"
@@ -168,6 +170,10 @@ def pull_platform_mtd_and_l30():
           "Meta Ads","spend","action_values_omni_purchase","mtd")
     merge(windsor_get("facebook",["campaign","spend","action_values_omni_purchase"],date_preset="last_30d",filters=[["account_name","eq",META_ACCOUNT]]),
           "Meta Ads","spend","action_values_omni_purchase","l30")
+    merge(windsor_get("reddit",["campaign","spend","purchase_total_value"],date_from=m,date_to=t,accounts=[REDDIT_ACCOUNT]),
+          "Reddit Ads","spend","purchase_total_value","mtd")
+    merge(windsor_get("reddit",["campaign","spend","purchase_total_value"],date_preset="last_30d",accounts=[REDDIT_ACCOUNT]),
+          "Reddit Ads","spend","purchase_total_value","l30")
     return out
 
 def pull_google_daily_spend():
@@ -202,6 +208,7 @@ def pull_daily_spend_all_platforms():
     add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]))
     add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]))
     add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]))
+    add(windsor_get("reddit",["date","spend","purchase_total_value"],date_from=start,date_to=end,accounts=[REDDIT_ACCOUNT]))
     return totals
 
 def pull_daily_detail():
@@ -222,6 +229,7 @@ def pull_daily_detail():
     add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]),"conversions_value")
     add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]),"revenue")
     add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]),"action_values_omni_purchase")
+    add(windsor_get("reddit",["date","spend","purchase_total_value"],date_from=start,date_to=end,accounts=[REDDIT_ACCOUNT]),"purchase_total_value")
     return out
 
 # ================================================================ LAG MATH
