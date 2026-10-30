@@ -39,8 +39,9 @@ weekends, so the curve simply catches up on Monday.
 
 **Keep the live prompt in step with the code on the default branch.** The scheduled run
 checks out the default branch, so a prompt that names the twelve pulls and the coverage
-stop rule must not go live before the code that implements them is merged. A session can
-update the prompt in place (`update_trigger`), which keeps the run history.
+stop rule must not go live before the code that implements them is merged. A session
+**cannot** edit it: the task was created in the UI, and agents may only edit tasks they
+created. Edit it at https://claude.ai/code/routines/trig_011uEEi3kLiMMuSG8Viti7Nn.
 
 ```
 Daily Antares / AutoTune paid-media pacing refresh.
