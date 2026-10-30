@@ -25,6 +25,8 @@ entirely** — no Sheet writes, no Slack post.
 | Google Ads | connector `google_ads`, account `802-485-7603` |
 | Microsoft Ads | connector `bing`, `account_name` = `Antares Adwords` |
 | Meta Ads | connector `facebook`, `account_name` = `Antares Ads` |
+| Reddit Ads | connector `reddit`, account `a2_esoyaxwp5glg` (antaresautotune) |
+| Campaign ID map | `campaign_ids.json` — tracker row name → `connector:campaign_id` |
 
 ## Step 1 — resolve dates
 
@@ -44,30 +46,37 @@ on the 1st of last month instead of ramping up from nothing. The routine's
 `daily_window()` computes exactly this union; feeding it a shorter window silently
 truncates last month. Every consumer narrows the window itself.
 
-## Step 2 — pull the nine Windsor datasets
+## Step 2 — pull the twelve Windsor datasets
 
-Call `mcp__Windsor_ai__get_data` nine times. Field names below are verified against
+Call `mcp__Windsor_ai__get_data` twelve times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
 `action_values_omni_purchase`, *not* `conversions_value`.
 
+**The `:mtd` and `:l30` pulls must include `campaign_id`.** With it, Windsor returns one
+row per campaign under its current name. Without it, a renamed campaign's spend is split
+across its old and new names, and the routine refuses rows that have no ID.
+
 | Cache key | connector | fields | window |
 |---|---|---|---|
-| `google_ads:mtd` | `google_ads` | `campaign, spend, conversions_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
-| `google_ads:l30` | `google_ads` | `campaign, spend, conversions_value` | `date_preset="last_30d"`, `accounts=["802-485-7603"]` |
+| `google_ads:mtd` | `google_ads` | `campaign_id, campaign, spend, conversions_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
+| `google_ads:l30` | `google_ads` | `campaign_id, campaign, spend, conversions_value` | `date_preset="last_30d"`, `accounts=["802-485-7603"]` |
 | `google_ads:daily` | `google_ads` | `date, spend, conversions_value` | `date_from=DAILY_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
-| `bing:mtd` | `bing` | `campaign, spend, revenue` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
-| `bing:l30` | `bing` | `campaign, spend, revenue` | `date_preset="last_30d"`, same filter |
+| `bing:mtd` | `bing` | `campaign_id, campaign, spend, revenue` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
+| `bing:l30` | `bing` | `campaign_id, campaign, spend, revenue` | `date_preset="last_30d"`, same filter |
 | `bing:daily` | `bing` | `date, spend, revenue` | `date_from=DAILY_START`, `date_to=TODAY`, same filter |
-| `facebook:mtd` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
-| `facebook:l30` | `facebook` | `campaign, spend, action_values_omni_purchase` | `date_preset="last_30d"`, same filter |
+| `facebook:mtd` | `facebook` | `campaign_id, campaign, spend, action_values_omni_purchase` | `date_from=MONTH_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
+| `facebook:l30` | `facebook` | `campaign_id, campaign, spend, action_values_omni_purchase` | `date_preset="last_30d"`, same filter |
 | `facebook:daily` | `facebook` | `date, spend, action_values_omni_purchase` | `date_from=DAILY_START`, `date_to=TODAY`, same filter |
+| `reddit:mtd` | `reddit` | `campaign_id, campaign, spend, purchase_total_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["a2_esoyaxwp5glg"]` |
+| `reddit:l30` | `reddit` | `campaign_id, campaign, spend, purchase_total_value` | `date_preset="last_30d"`, same account |
+| `reddit:daily` | `reddit` | `date, spend, purchase_total_value` | `date_from=DAILY_START`, `date_to=TODAY`, same account |
 
-The three `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
+The four `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
 iROAS Daily tab, which is why they carry each platform's conversion-value field too.
 Google's also feeds the lag gross-up — Google only, because the maturation curve comes
 from the Google Time Lag report.
 
-Write all nine result arrays into one JSON file keyed exactly as above:
+Write all twelve result arrays into one JSON file keyed exactly as above:
 
 ```json
 { "google_ads:mtd": [ {...}, ... ], "google_ads:l30": [ ... ], ... }
@@ -78,7 +87,9 @@ Save it to `/tmp/windsor_cache.json`.
 **Sanity-check before continuing.** If any of these fail, stop and report rather than
 writing partial data to a live client sheet:
 
-- all nine keys present and non-empty
+- all twelve keys present. Every key must be non-empty **except the three `bing:*` keys**:
+  Microsoft Ads has been paused since 2026-10-06, so `bing:mtd` is empty from Nov 1 and
+  `bing:l30` from about Nov 5. Empty Bing is expected; any other empty key, stop.
 - each `:daily` key has ~30 rows, one per date
 - MTD spend totals are plausible (Google MTD has been running ~$85–95k mid-month)
 
@@ -98,8 +109,10 @@ python3 pacing_tracker_daily.py
 The script writes only these cells, exactly as before:
 
 - `Pacing Tracker` **E** (MTD spend), **G** (L30D spend), **H** (L30D conv value) per campaign
-- `Pacing Tracker` **F** (daily budget) for Meta rows only — Meta uses CBO/lifetime, so
-  the daily baseline is approximated as L30D ÷ 30
+- `Pacing Tracker` **F** (daily budget) for Meta and Reddit rows only — both are set up
+  without a fixed daily budget in the sheet, so the baseline is approximated as L30D ÷ 30
+- A tracker row with no Windsor data this run gets **$0** in E/G/H, not the previous
+  run's numbers (unless its whole platform returned nothing — then it is left alone)
 - `Config` C65 — spend-weighted lag gross-up
 - `Config` C77 — last-run stamp
 - `Pacing Curve` D3:D(last day of month) — cumulative spend through today, and the
@@ -114,14 +127,22 @@ the three queues) is recomputed by the Sheet's own formulas.
 
 The script prints a reconciliation block. **Read it before posting.**
 
-- `[match] N/M sheet rows matched` — campaigns are matched by *exact name*. A campaign
-  renamed on-platform silently stops updating; it shows up as `in sheet, no Windsor data`.
+- `[match] N/M tracker rows have Windsor data` — rows are tied to campaigns by **ID**
+  through `campaign_ids.json`, so an on-platform rename no longer breaks a row.
+  - `matched by name only, pin it` — a row not in `campaign_ids.json` yet; it works, but
+    add it to the file so the next rename does not break it.
+  - `no campaign ID for tracker row` — the row reads $0. Find its ID and add it.
+  - `in Windsor, no tracker row` — a campaign the tracker cannot see (usually a new
+    launch). Add it with `add_tracker_rows.py`.
+  - `no Windsor data, written as $0` — the campaign did not spend in either window.
+    Expected for paused campaigns.
+- `[coverage] ... (NN.N%)` — share of Windsor MTD spend that lands on a tracker row.
 - `[timelag] ... skipped` — a Time Lag export was found but its window isn't matured
   (< 28 days). This is correct behavior; the existing curve is kept. Mention it in your
   summary but do not override it.
 
-If more than a couple of rows are unmatched, report that to the user instead of
-treating the run as clean.
+If coverage is below 98%, report that to the user instead of treating the run as clean.
+The digest carries the coverage line and lists unmapped campaigns either way.
 
 ## Step 5 — post the digest
 

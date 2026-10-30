@@ -6,13 +6,17 @@ Objective the sheet encodes: MAXIMIZE SPEND while blended incremental ROAS >= fl
 Budget is a guardrail, not the target.
 
 What this routine does each morning:
-  1. Pull MTD + L30D spend/conv-value per campaign from Windsor.ai for all 3 platforms
-       - google_ads   (account 802-485-7603)  conv field: conversions_value
-       - bing         (Antares Adwords)        conv field: revenue
-       - facebook     (Antares Ads)            conv field: action_values_omni_purchase
+  1. Pull MTD + L30D spend/conv-value per campaign from Windsor.ai for all 4 platforms
+       - google_ads   (account 802-485-7603)    conv field: conversions_value
+       - bing         (Antares Adwords)          conv field: revenue
+       - facebook     (Antares Ads)              conv field: action_values_omni_purchase
+       - reddit       (antaresautotune)          conv field: purchase_total_value
+     Campaigns are keyed by campaign ID, and each tracker row is tied to its ID through
+     campaign_ids.json - see resolve_rows() for why names alone are not enough.
   2. Pull the trailing-30d DAILY spend series (Google) to compute the SPEND-WEIGHTED
      conversion-lag gross-up multiplier from the maturation curve in the sheet.
-  3. Write per-campaign raw data into the Pacing Tracker tab (cols E,F,G,H). The sheet's
+  3. Write per-campaign raw data into the Pacing Tracker tab (cols E,F,G,H). A row with
+     no Windsor data is written as $0 rather than left holding an old run's numbers. The sheet's
      own formulas recompute lag-adjusted ROAS, iROAS, bands, suggested budgets, headline.
   4. Write the spend-weighted multiplier into Config so lag adjustment stays current.
   5. Rewrite the whole month-to-date cumulative spend series in Pacing Curve, so the
@@ -56,11 +60,28 @@ DRY_RUN         = os.environ.get("PACING_DRY_RUN", "").lower() in ("1", "true", 
 GOOGLE_CID   = "802-485-7603"
 BING_ACCOUNT = "Antares Adwords"     # account_name filter value
 META_ACCOUNT = "Antares Ads"
+REDDIT_ACCOUNT = "a2_esoyaxwp5glg"   # "antaresautotune"
+
+# (Pacing Tracker col A label, Windsor connector, account selector, conv-value field)
+PLATFORMS = [
+    ("Google Ads",    "google_ads", dict(accounts=[GOOGLE_CID]),                       "conversions_value"),
+    ("Microsoft Ads", "bing",       dict(filters=[["account_name","eq",BING_ACCOUNT]]), "revenue"),
+    ("Meta Ads",      "facebook",   dict(filters=[["account_name","eq",META_ACCOUNT]]), "action_values_omni_purchase"),
+    ("Reddit Ads",    "reddit",     dict(accounts=[REDDIT_ACCOUNT]),                    "purchase_total_value"),
+]
+# Platforms whose Daily Budget column the routine derives as L30D spend / 30. Meta runs
+# CBO/lifetime budgets and Reddit's rows were set up the same way; every other platform's
+# daily budget is entered by hand.
+DERIVED_DAILY = {"Meta Ads", "Reddit Ads"}
+
+CAMPAIGN_IDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "campaign_ids.json")
+# Share of Windsor MTD spend that must land on a tracker row before the digest warns.
+COVERAGE_MIN = float(os.environ.get("PACING_COVERAGE_MIN", "0.98"))
 
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
 
-# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily, Meta only), G(l30sp), H(l30cv).
+# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily, DERIVED_DAILY only), G(l30sp), H(l30cv).
 COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
          l30roas=9,iroas=10,ivsf=11,band=12,sugg=13,dbud=14,exp=15,pace=16,proj=17,
          action=18,grace=19,notes=20)
@@ -89,12 +110,13 @@ def daily_window():
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None):
     """
-    Stable name for one Windsor pull. The nine calls this routine makes are fully
+    Stable name for one Windsor pull. The twelve calls this routine makes are fully
     distinguished by connector + window, so the slash command can populate the cache
     without reconstructing argument tuples:
         google_ads:mtd  google_ads:l30  google_ads:daily
         bing:mtd        bing:l30        bing:daily
         facebook:mtd    facebook:l30    facebook:daily
+        reddit:mtd      reddit:l30      reddit:daily
     """
     if date_preset:            window = "l30"
     elif "date" in fields:     window = "daily"
@@ -116,6 +138,7 @@ def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=Non
     Field names are verified live against get_fields (2026-08-12):
       google_ads: spend, conversions_value | bing: spend, revenue |
       facebook: spend, action_values_omni_purchase   (NOT conversions_value)
+      reddit: spend, purchase_total_value             (verified 2026-10-30)
     """
     key = windsor_cache_key(connector, fields, date_preset)
 
@@ -145,30 +168,81 @@ def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=Non
     return r.json().get("data", [])
 
 def pull_platform_mtd_and_l30():
-    """Return {campaign: {platform, mtd_spend, mtd_cv, l30_spend, l30_cv}} across all 3 platforms."""
+    """
+    Return {"connector:campaign_id": {platform, name, mtd_spend, mtd_cv, l30_spend, l30_cv}}
+    across every platform in PLATFORMS.
+
+    Keyed by ID, not name. Requesting campaign_id makes Windsor return one row per
+    campaign under its current name; a name-only pull splits a renamed campaign's history
+    across its old and new names, so neither name carries the full number.
+    """
     m = TODAY.replace(day=1).isoformat(); t = TODAY.isoformat()
     out = {}
-    def merge(rows, plat, spend_f, cv_f, window):
+    def merge(rows, plat, connector, cv_f, window):
         for r in rows:
-            name=r.get("campaign")
-            if not name: continue
-            d=out.setdefault(name, {"platform":plat,"mtd_spend":0,"mtd_cv":0,"l30_spend":0,"l30_cv":0})
-            d["platform"]=plat
-            d[f"{window}_spend"]=float(r.get(spend_f) or 0)
-            d[f"{window}_cv"]=float(r.get(cv_f) or 0)
-    merge(windsor_get("google_ads",["campaign","spend","conversions_value"],date_from=m,date_to=t,accounts=[GOOGLE_CID]),
-          "Google Ads","spend","conversions_value","mtd")
-    merge(windsor_get("google_ads",["campaign","spend","conversions_value"],date_preset="last_30d",accounts=[GOOGLE_CID]),
-          "Google Ads","spend","conversions_value","l30")
-    merge(windsor_get("bing",["campaign","spend","revenue"],date_from=m,date_to=t,filters=[["account_name","eq",BING_ACCOUNT]]),
-          "Microsoft Ads","spend","revenue","mtd")
-    merge(windsor_get("bing",["campaign","spend","revenue"],date_preset="last_30d",filters=[["account_name","eq",BING_ACCOUNT]]),
-          "Microsoft Ads","spend","revenue","l30")
-    merge(windsor_get("facebook",["campaign","spend","action_values_omni_purchase"],date_from=m,date_to=t,filters=[["account_name","eq",META_ACCOUNT]]),
-          "Meta Ads","spend","action_values_omni_purchase","mtd")
-    merge(windsor_get("facebook",["campaign","spend","action_values_omni_purchase"],date_preset="last_30d",filters=[["account_name","eq",META_ACCOUNT]]),
-          "Meta Ads","spend","action_values_omni_purchase","l30")
+            cid = r.get("campaign_id")
+            if not cid:
+                if r.get("campaign"):
+                    raise RuntimeError(
+                        f"{connector}:{window} rows carry no campaign_id. The pull must request "
+                        f"campaign_id alongside campaign - see the slash command's pull table.")
+                continue
+            key = f"{connector}:{cid}"
+            d = out.setdefault(key, {"platform":plat,"name":r.get("campaign") or "",
+                                     "mtd_spend":0.0,"mtd_cv":0.0,"l30_spend":0.0,"l30_cv":0.0})
+            if r.get("campaign"): d["name"] = r["campaign"]
+            d[f"{window}_spend"] += float(r.get("spend") or 0)
+            d[f"{window}_cv"]    += float(r.get(cv_f) or 0)
+    for plat, connector, sel, cv_f in PLATFORMS:
+        fields = ["campaign_id", "campaign", "spend", cv_f]
+        merge(windsor_get(connector, fields, date_from=m, date_to=t, **sel), plat, connector, cv_f, "mtd")
+        merge(windsor_get(connector, fields, date_preset="last_30d", **sel), plat, connector, cv_f, "l30")
     return out
+
+def load_campaign_ids(path=CAMPAIGN_IDS_FILE):
+    """{tracker row name: "connector:campaign_id"} from campaign_ids.json, or {} if absent."""
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        raw = json.load(f)
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+def resolve_rows(names, data, id_map):
+    """
+    Tie each tracker row to one Windsor campaign key ("connector:campaign_id").
+
+    Rows were matched by exact name, which breaks on every rename: the tracker keeps the
+    old name and the campaign's spend reports under the new one. On 2026-10-30 the video
+    campaign was renamed ATA -> ATU and its row stopped updating while sitting at the top
+    of Cut or Fix; three UK/AUS campaigns were renamed "DNU ..." and replaced by new
+    campaigns under the old names.
+
+    Order: campaign_ids.json first, then the campaign's CURRENT name as a fallback, so a
+    new row works on its first run but is reported until it is pinned in the file.
+
+    Returns (resolved, by_name, unresolved, dupes):
+      resolved   {row name: key}  the key can be absent from `data`: that campaign
+                                  simply had no spend in either window
+      by_name    [row name]       resolved through the name fallback only
+      unresolved [row name]       no ID in the file and no campaign by that name
+      dupes      [(row, earlier row)]  two rows claiming one campaign; the second is skipped
+    """
+    current = {}
+    for k, d in data.items():
+        current.setdefault(d["name"], []).append(k)
+    resolved, by_name, unresolved, dupes, claimed = {}, [], [], [], {}
+    for n in names:
+        key = id_map.get(n)
+        if key is None:
+            hits = current.get(n, [])
+            if len(hits) == 1:
+                key = hits[0]; by_name.append(n)
+        if key is None:
+            unresolved.append(n); continue
+        if key in claimed:
+            dupes.append((n, claimed[key])); continue
+        claimed[key] = n; resolved[n] = key
+    return resolved, by_name, unresolved, dupes
 
 def pull_google_daily_spend():
     """Trailing-30d daily spend (Google) -> {date: spend} for the spend-weighted multiplier.
@@ -182,7 +256,7 @@ def pull_google_daily_spend():
 
 def pull_daily_spend_all_platforms():
     """
-    Month-to-date daily spend summed across all three platforms -> {date: spend}.
+    Month-to-date daily spend summed across all platforms -> {date: spend}.
 
     Feeds the month-to-date cumulative series on Pacing Curve. Separate from
     pull_google_daily_spend() in two ways: that one is Google-only on purpose (see
@@ -195,13 +269,10 @@ def pull_daily_spend_all_platforms():
     """
     start, end = daily_window()
     totals={}
-    def add(rows):
-        for r in rows:
+    for _plat, connector, sel, cv_f in PLATFORMS:
+        for r in windsor_get(connector,["date","spend",cv_f],date_from=start,date_to=end,**sel):
             d=r.get("date")
             if d: totals[d]=totals.get(d,0.0)+float(r.get("spend") or 0)
-    add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]))
-    add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]))
-    add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]))
     return totals
 
 def pull_daily_detail():
@@ -213,15 +284,12 @@ def pull_daily_detail():
     """
     start, end = daily_window()
     out={}
-    def add(rows, cvf):
-        for r in rows:
+    for _plat, connector, sel, cv_f in PLATFORMS:
+        for r in windsor_get(connector,["date","spend",cv_f],date_from=start,date_to=end,**sel):
             d=r.get("date")
             if not d: continue
             sp,cv = out.get(d,(0.0,0.0))
-            out[d]=(sp+float(r.get("spend") or 0), cv+float(r.get(cvf) or 0))
-    add(windsor_get("google_ads",["date","spend","conversions_value"],date_from=start,date_to=end,accounts=[GOOGLE_CID]),"conversions_value")
-    add(windsor_get("bing",["date","spend","revenue"],date_from=start,date_to=end,filters=[["account_name","eq",BING_ACCOUNT]]),"revenue")
-    add(windsor_get("facebook",["date","spend","action_values_omni_purchase"],date_from=start,date_to=end,filters=[["account_name","eq",META_ACCOUNT]]),"action_values_omni_purchase")
+            out[d]=(sp+float(r.get("spend") or 0), cv+float(r.get(cv_f) or 0))
     return out
 
 # ================================================================ LAG MATH
@@ -687,7 +755,7 @@ def main():
 
     data=pull_platform_mtd_and_l30()
     daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
-    daily_all=pull_daily_spend_all_platforms() # all three  -> pacing curve series
+    daily_all=pull_daily_spend_all_platforms() # all platforms -> pacing curve series
 
     new_curve=refresh_curve_from_timelag()
     if new_curve:
@@ -698,26 +766,56 @@ def main():
     mult=spend_weighted_multiplier(curve,daily_spend)
 
     names=tracker.col_values(COL["campaign"])
+    plats=tracker.col_values(COL["platform"])
     row_for={n:i+1 for i,n in enumerate(names) if i+1>=DATA_START_ROW and n}
+    platform_of={n:(plats[r-1] if r-1<len(plats) else "") for n,r in row_for.items()}
+    id_map=load_campaign_ids()
+    resolved, by_name, unresolved, dupes = resolve_rows(list(row_for), data, id_map)
+
+    # A platform with no rows at all in the pull is a failed pull or a channel that has
+    # been dark for 30+ days; either way there is nothing to overwrite its rows with, so
+    # they are left alone rather than zeroed on the strength of an empty response.
+    live_platforms={d["platform"] for d in data.values()}
+    ZERO={"mtd_spend":0.0,"l30_spend":0.0,"l30_cv":0.0}
+
+    skipped={n for n, _ in dupes}
     cells=[]
-    matched=[]
+    matched=[]; zeroed=[]
     for name,wrow in row_for.items():
-        d=data.get(name)
-        if not d: continue
-        matched.append(name)
+        if name in skipped:
+            continue
+        key=resolved.get(name)
+        d=data.get(key) if key else None
+        if d:
+            matched.append(name)
+        elif platform_of[name] in live_platforms:
+            # No Windsor data for this row. Write $0 instead of leaving the previous run's
+            # numbers in place: stale cells keep feeding the blend and the queues as if live.
+            d=ZERO; zeroed.append(name)
+        else:
+            continue
         cells.append(gspread.Cell(wrow,COL["mtd"],   round(d["mtd_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30sp"], round(d["l30_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30cv"], round(d["l30_cv"],2)))
-        if d["platform"]=="Meta Ads":
+        if platform_of[name] in DERIVED_DAILY:
             cells.append(gspread.Cell(wrow,COL["daily"], round(d["l30_spend"]/30,2)))
 
-    # Reconciliation: a campaign renamed on-platform silently stops updating, because
-    # rows are matched by exact name. Surface both sides of the mismatch every run.
-    unmatched_sheet=[n for n in row_for if n not in data]
-    unmatched_feed =[n for n in data if n not in row_for]
-    print(f"[match] {len(matched)}/{len(row_for)} sheet rows matched to Windsor campaigns")
-    for n in unmatched_sheet: print(f"  [!] in sheet, no Windsor data : {n}")
-    for n in unmatched_feed:  print(f"  [!] in Windsor, no sheet row  : {n}")
+    # Reconciliation, printed every run and summarised in the digest.
+    claimed=set(resolved.values())
+    unclaimed=sorted(((k,d) for k,d in data.items() if k not in claimed),
+                     key=lambda kd: -kd[1]["mtd_spend"])
+    print(f"[match] {len(matched)}/{len(row_for)} tracker rows have Windsor data this run "
+          f"({len(resolved)} tied to a campaign ID, {len(by_name)} of those by current name only)")
+    for n in by_name:
+        print(f"  [i] matched by name only, pin it in campaign_ids.json : {n} -> {resolved[n]}")
+    for n in unresolved:
+        print(f"  [!] no campaign ID for tracker row                 : {n}")
+    for n, first in dupes:
+        print(f"  [!] same campaign as an earlier row, skipped        : {n}  (= {first})")
+    for n in zeroed:
+        print(f"  [-] no Windsor data, written as $0                 : {n}")
+    for k, d in unclaimed:
+        print(f"  [!] in Windsor, no tracker row : {d['name']}  ({k}, ${d['mtd_spend']:,.0f} MTD)")
 
     if cells and not DRY_RUN:
         tracker.update_cells(cells, value_input_option="USER_ENTERED")
@@ -726,6 +824,13 @@ def main():
     if not DRY_RUN: write_multiplier(cfg,mult)
 
     total_mtd=sum(d["mtd_spend"] for d in data.values())
+    # Coverage, spend-weighted: a count of matched rows treats a dead $0 row the same as
+    # a $10k campaign. What matters is how much of the money the tracker can see.
+    covered_mtd=sum(data[k]["mtd_spend"] for k in claimed if k in data)
+    coverage=(covered_mtd/total_mtd) if total_mtd else 1.0
+    print(f"[coverage] ${covered_mtd:,.0f} of ${total_mtd:,.0f} MTD spend lands on a tracker row "
+          f"({coverage*100:.1f}%)" + ("" if coverage>=COVERAGE_MIN
+          else f"   <== below {COVERAGE_MIN*100:.0f}%, investigate before trusting the queues"))
     curve_ws=sh.worksheet(TAB_CURVE)
 
     # Rewrite the whole month-to-date cumulative series, not just today's cell.
@@ -840,6 +945,21 @@ def main():
         delta = projected_mtd/budget_guardrail - 1
         over = f"  ({'over' if delta>0 else 'under'} the ${budget_guardrail:,.0f} guardrail by {abs(delta)*100:.0f}%)"
 
+    def coverage_lines():
+        """Data-quality lines for the digest; empty when coverage is clean."""
+        out = []
+        if coverage < COVERAGE_MIN:
+            out.append(f":rotating_light: *Only {coverage*100:.1f}% of MTD spend lands on a tracker "
+                       f"row* (below {COVERAGE_MIN*100:.0f}%). Treat the queues as incomplete.")
+        if unclaimed:
+            shown = ", ".join(f"{d['name']} (${d['mtd_spend']:,.0f})" for _k, d in unclaimed[:4])
+            more = f" +{len(unclaimed)-4} more" if len(unclaimed) > 4 else ""
+            out.append(f":warning: {len(unclaimed)} Windsor campaign(s) with no tracker row: {shown}{more}")
+        if unresolved:
+            out.append(f":warning: {len(unresolved)} tracker row(s) not tied to a campaign ID, "
+                       f"so they read $0: " + ", ".join(unresolved[:4]))
+        return out
+
     def _x(v):
         """Render a ratio, or n/a. An empty window is absent, not 0.00x."""
         return f"{v:.2f}x" if v is not None else "n/a"
@@ -859,13 +979,17 @@ def main():
 
     # iROAS per campaign, joined from Pacing Tracker col J by campaign name (col B).
     # The Suggestions Tracker does not carry iROAS, and the Raise queue ranks on it.
+    # L30D spend (col G) rides along: a row with none is a dead campaign, not a decision.
     iroas_by_campaign = {}
+    l30_by_campaign = {}
     for r in tracker.get_values(f"B{DATA_START_ROW}:J{LAST_ROW}"):
         r = (list(r) + [""]*9)[:9]
         if r[0]:
             iroas_by_campaign[r[0]] = _n(r[8])
+            l30_by_campaign[r[0]] = _n(r[5])
 
     queues = defaultdict(list)  # action -> list of (campaign, cur, sug, iroas)
+    inactive = 0
     for row in st_rows[2:]:
         if len(row) < 6:
             continue
@@ -873,6 +997,11 @@ def main():
         if action not in ("Cut or Fix", "Raise", "Reduce"):
             continue
         camp = row[1]
+        # No L30D spend: the campaign is paused or gone. Its 0.00x lands it in Cut or Fix
+        # every day, which buries the real decisions under rows nobody can act on.
+        if camp in l30_by_campaign and l30_by_campaign[camp] <= 0:
+            inactive += 1
+            continue
         # .get() returns None for a name absent from the tracker, which is a real
         # problem; 0.0 is a legitimate iROAS (zero conversion value) and must not be
         # confused with it. Both sort last in Raise, but only the former is worth a warning.
@@ -924,6 +1053,8 @@ def main():
         + (f"${headroom:,.0f}" if headroom >= 0 else "$0  (already below floor \u2014 no headroom)"),
         f"Guardrail: {hl('GUARDRAIL STATUS')}",
         f"Lag gross-up (spend-weighted): x{mult:.3f}" + ("  [curve refreshed]" if new_curve else ""),
+        f"Data coverage: {coverage*100:.1f}% of MTD spend on a tracker row",
+        *coverage_lines(),
         f"Sheet: {SHEET_URL}",
         "",
         ":warning: *All suggestions require review before applying.*",
@@ -931,6 +1062,8 @@ def main():
     lines += queue_block("Cut or Fix", ":mag: *Cut or Fix* (below 1.0x — diagnose tracking/LP/approvals/audience first)")
     lines += queue_block("Raise", ":arrow_up: *Raise if volume available* (ranked by iROAS; ceiling lift, credit only if spend lands)", by_iroas=True)
     lines += queue_block("Reduce", ":arrow_down: *Reduce* (below waterline; right-size down)")
+    if inactive:
+        lines.append(f"_{inactive} rows with no L30D spend left out of the queues (paused or ended)._")
     post_slack("\n".join(lines))
 
 if __name__ == "__main__":
