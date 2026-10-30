@@ -347,6 +347,11 @@ within it.
 from a Google Ads row. Reddit rows carry a hand-set incrementality factor in column D and
 are never used as the template. It dry-runs by default; `--apply` writes. Re-running is safe.
 
+Applied 2026-10-30: the three new UK/AUS Demand Gen rows went in at rows 54–56 (block now
+3–57), Suggestions Tracker rows 59–61 and Alerts rows 55–57, and the video row was renamed
+ATA → ATU. Checked after the write: every headline, frontier and rank range reads `$3:$57`,
+both mirror tabs reference each of the 55 tracker rows exactly once, and no `#REF!`.
+
 The `DNU …` rows stay until their L30D spend reaches $0 (around late November). They still
 carry real spend in the 30-day window, and deleting them would also leave `#REF!` in the
 two mirror tabs.

@@ -81,6 +81,8 @@ def main():
         print(f"  ~ rename row {names.index(o)+1}: {o}  ->  {nn}")
 
     # Mirror tabs: one new row each per tracker row, built from their first data row.
+    # Alerts is NOT in tracker-row order (its row 50 pointed at tracker row 54 before the
+    # 2026-10-30 insert), so rows are appended and own-row refs ($A55) point at themselves.
     st_f = st.get_values(value_render_option="FORMULA")
     st_last = max(i for i, r in enumerate(st_f, 1) if any(str(c).strip() for c in r))
     # First campaign row, by formula: section headers are plain text and must not be copied.
@@ -131,8 +133,10 @@ def main():
             own = al_last + 1 + k
             al_rows.append([retarget(c, r, own, P.DATA_START_ROW) if c.startswith("=") else ""
                             for c in al_tmpl])
-        st.update(f"A{st_last+1}:{a1(len(st_tmpl), st_last+n)}", st_rows, value_input_option="USER_ENTERED")
-        alerts.update(f"A{al_last+1}:{a1(len(al_tmpl), al_last+n)}", al_rows, value_input_option="USER_ENTERED")
+        st.update(values=st_rows, range_name=f"A{st_last+1}:{a1(len(st_tmpl), st_last+n)}",
+                  value_input_option="USER_ENTERED")
+        alerts.update(values=al_rows, range_name=f"A{al_last+1}:{a1(len(al_tmpl), al_last+n)}",
+                      value_input_option="USER_ENTERED")
 
     if renames:
         names = tracker.col_values(P.COL["campaign"])
