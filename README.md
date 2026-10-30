@@ -21,8 +21,8 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 
 | Target | Cells |
 |---|---|
-| `Pacing Tracker` | **E** MTD spend, **G** L30D spend, **H** L30D conv value (per campaign row) |
-| `Pacing Tracker` | **F** daily budget — *Meta rows only*, approximated as L30D ÷ 30 (Meta uses CBO/lifetime budgets) |
+| `Pacing Tracker` | **E** MTD spend, **G** L30D spend, **H** L30D conv value (per campaign row; $0 when the campaign has no Windsor data) |
+| `Pacing Tracker` | **F** daily budget — *Meta and Reddit rows only*, approximated as L30D ÷ 30 (Meta uses CBO/lifetime budgets; Reddit rows were set up the same way) |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
 | `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
@@ -46,6 +46,7 @@ Nothing else is touched.
 | `TIMELAG_MIN_MATURITY_DAYS` | Maturity guard, default `28`. See below |
 | `PACING_DRY_RUN` | `1` to skip all writes and the Slack post |
 | `PACING_ALLOW_MONTH_MISMATCH` | `1` to bypass the month-rollover guard. See below |
+| `PACING_COVERAGE_MIN` | Share of MTD spend that must land on a tracker row before the digest warns. Default `0.98` |
 
 With neither `SLACK_OUT` nor `SLACK_BOT_TOKEN` set, the digest prints to stdout and is
 **not** posted — a misconfigured run stays silent rather than posting somewhere
@@ -293,10 +294,84 @@ objects, so without that they stack up two per day.
 
 Recent days carry the widest error bars by construction. One day is not a result.
 
+## Campaigns are matched by ID
+
+Tracker rows are tied to campaigns through `campaign_ids.json`, which maps each row name
+(column B) to `connector:campaign_id`. Exact-name matching broke on every rename, and
+quietly: on 2026-10-30 the video campaign was renamed ATA → ATU and its row stopped
+updating while it sat at the top of Cut or Fix, and three UK/AUS campaigns were renamed
+`DNU …` and replaced by new campaigns under the old names.
+
+A name-only Windsor pull makes this worse than "the row stops updating". Windsor labels
+each cached day with whatever name the campaign had when that day was fetched, so a
+renamed campaign's spend comes back **split across its old and new names**: October showed
+$3,826 under ATA and $6,292 under ATU for what is one campaign at $10,121. Requesting
+`campaign_id` returns one row per campaign under its current name. The routine refuses a
+`:mtd`/`:l30` pull that has no IDs.
+
+Resolution order is the map first, then the campaign's current name, so a newly added row
+works straight away and is reported until it is pinned. Keeping the map current:
+
+- **Campaign renamed on-platform** — nothing breaks. Add the new name as a second key with
+  the same ID if the tracker row is renamed too.
+- **New campaign** — it shows as `in Windsor, no tracker row` and in the digest. Add the
+  row with `add_tracker_rows.py` (below) and pin its ID in the map.
+- **Row with no ID** — reads $0 and is listed in the digest.
+
+### Coverage, not a row count
+
+The run reports the share of Windsor MTD spend that lands on a tracker row, and the
+digest warns below 98%. It replaces "~40 of 45 rows matched", which treated a dead $0 row
+the same as a $10k campaign and stopped meaning anything once the tracker grew to 52 rows.
+On 2026-10-30, before the new rows were added: 99.7%, with the three new campaigns
+($600 MTD) as the only gap.
+
+### Rows with no data read $0
+
+A row whose campaign did not spend in either window is written as $0 instead of keeping
+the last run's numbers, which otherwise sat in the blend and the queues as if live. The
+exception is a platform whose pull came back empty altogether: that is either a failed
+pull or a channel dark for 30+ days, and neither is grounds to overwrite. Rows with no
+L30D spend are left out of the digest's queues and counted in one line. The four Microsoft
+Ads rows that have not spent since September are the current example.
+
+### Adding rows: `add_tracker_rows.py`
+
+A new campaign needs a row in three tabs, not one. Suggestions Tracker (which feeds the
+digest's queues) and Alerts each point at Pacing Tracker rows by number, so a row added only
+to Pacing Tracker never reaches the digest. The rows also have to go **inside** the block:
+the headline, frontier and rank formulas use `$3:$54`, which only expands for an insert
+within it.
+
+`add_tracker_rows.py` does all of that from a list at the top of the file, copying formulas
+from a Google Ads row. Reddit rows carry a hand-set incrementality factor in column D and
+are never used as the template. It dry-runs by default; `--apply` writes. Re-running is safe.
+
+The `DNU …` rows stay until their L30D spend reaches $0 (around late November). They still
+carry real spend in the 30-day window, and deleting them would also leave `#REF!` in the
+two mirror tabs.
+
+## Reddit
+
+Pulled from Windsor's `reddit` connector (account `a2_esoyaxwp5glg`), conversion value
+`purchase_total_value`. Until 2026-10-30 the routine skipped Reddit: the four Reddit rows
+were filled some other way and ran a day or two behind, and Reddit's spend (~$9.8k MTD,
+4.8% of the October total) was missing from the routine's total MTD and the Pacing Curve.
+Comparisons of total MTD or the pacing curve across that date are not like for like.
+
+Two caveats. Reddit's incrementality factor (0.654) is set by hand in column D, not from
+the Config table, because the D formula only knows Google, Meta and Microsoft. And
+Reddit's attribution window is not Google's, so the Google-derived lag gross-up is a rough
+fit for Reddit rows.
+
 ## Known gaps
 
-- **Campaigns are matched by exact name.** Rename a campaign on-platform and its row
-  silently stops updating. Every run prints a reconciliation block — read it.
+- **Google daily budgets (column F) are entered by hand** and drift. On 2026-10-30 the
+  video campaign's row said $700/day against a $450 budget in Google Ads, which overstates
+  its Cut or Fix line.
+- **The video campaign is judged on purchase iROAS.** It is a Views campaign, so it reads
+  0.00x and sits in Cut or Fix whatever it does. Whether it belongs in the model is a
+  modelling decision, not a data fix.
 - **Two MTD figures that don't quite agree.** The pacing curve is built from date-level
   daily spend; the tracker rows come from a campaign-level pull. Date-level totals run
   ~1% higher, because they include spend not attributable to a currently-reported
