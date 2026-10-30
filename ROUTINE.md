@@ -1,7 +1,8 @@
 # Scheduling the daily refresh
 
-**Nothing is scheduled right now.** Create the Routine from the claude.ai Routines UI —
-not from a Claude session — for the reason below, then paste the prompt at the bottom.
+Scheduled as **"Antares PacingUpdate"** (`trig_011uEEi3kLiMMuSG8Viti7Nn`), `0 13 * * *` UTC,
+created from the claude.ai Routines UI. If it ever has to be recreated, use the UI — not a
+Claude session — for the reason below, then paste the prompt at the bottom.
 
 ## Why the UI, specifically
 
@@ -36,10 +37,10 @@ weekends, so the curve simply catches up on Monday.
 
 ## Prompt
 
-**The live Routine still carries the old prompt** ("fewer than ~40 of the 45 campaign rows
-match by name", "nine Windsor pulls"). The prompt lives in the claude.ai Routines UI and a
-session cannot edit it, so paste the block below over it. Until then the routine follows
-the command file, which is current, but may apply the stale stop rules.
+**Keep the live prompt in step with the code on the default branch.** The scheduled run
+checks out the default branch, so a prompt that names the twelve pulls and the coverage
+stop rule must not go live before the code that implements them is merged. A session can
+update the prompt in place (`update_trigger`), which keeps the run history.
 
 ```
 Daily Antares / AutoTune paid-media pacing refresh.
@@ -72,6 +73,7 @@ STOP AND DO NOT POST if any of these are true — report the failure instead:
 
 Do not change the Sheet's formulas or the routine's logic. All budget suggestions in the
 digest are review-gated; never apply them to the ad platforms.
+Do not halt posting if a channel is at $0.
 ```
 
 ## If you would rather not depend on connector auth
