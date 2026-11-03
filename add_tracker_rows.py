@@ -19,18 +19,16 @@ import gspread
 
 import pacing_tracker_daily as P
 
-ADDED = "2026-10-30"
+ADDED = "2026-11-03"
 
 # (platform, campaign name, channel type, daily budget $, note). Budgets read from Google
 # Ads campaign_budget.amount_micros on the date above. MTD/L30D columns start at $0 and
 # the routine fills them on its next run - each name is pinned in campaign_ids.json.
 NEW_ROWS = [
-    ("Google Ads", "Google Ads | ATU | Demand Gen | Remarketing | UK | EN", "Demand Gen", 200.0,
-     "Launched 2026-10-29, replacing the paused DNU ATU Remarketing UK campaign (id 24401035329)."),
-    ("Google Ads", "Google Ads | AT2026 | Demand Gen | Remarketing | AUS | EN", "Demand Gen", 200.0,
-     "Launched 2026-10-29, replacing the paused DNU AT2026 Remarketing AUS campaign (id 24403115748)."),
-    ("Google Ads", "Google Ads | AT2026 | Demand Gen | Prospecting | AUS | EN", "Demand Gen", 100.0,
-     "Launched 2026-10-30, replacing the paused DNU AT2026 Prospecting AUS campaign (id 24407202164)."),
+    ("Google Ads", "Google Ads | ATU | Demand Gen | Remarketing | AUS | EN", "Demand Gen", 200.0,
+     "Campaign id 24413272297, found by the 2026-11-03 coverage check (spending, no tracker row)."),
+    ("Google Ads", "Google Ads | ATU | Demand Gen | Prospecting | AUS | EN", "Demand Gen", 100.0,
+     "Campaign id 24409518395, found by the 2026-11-03 coverage check (spending, no tracker row)."),
 ]
 
 # Tracker rows whose campaign was renamed on-platform: (old name, new name). The ID link
