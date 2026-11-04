@@ -69,10 +69,29 @@ PLATFORMS = [
     ("Meta Ads",      "facebook",   dict(filters=[["account_name","eq",META_ACCOUNT]]), "action_values_omni_purchase"),
     ("Reddit Ads",    "reddit",     dict(accounts=[REDDIT_ACCOUNT]),                    "purchase_total_value"),
 ]
-# Platforms whose Daily Budget column the routine derives as L30D spend / 30. Meta runs
-# CBO/lifetime budgets and Reddit's rows were set up the same way; every other platform's
-# daily budget is entered by hand.
+# Daily Budget (col F) is read from each platform's configured budget - see
+# pull_daily_budgets(). When a campaign has no daily budget to read (lifetime-only, or it
+# did not deliver in the budget window), platforms in DERIVED_DAILY fall back to
+# L30D spend / 30, as before; every other platform's cell is left as it is.
 DERIVED_DAILY = {"Meta Ads", "Reddit Ads"}
+
+# (connector, fields, how to read a daily budget in account currency from the rows)
+# Verified live 2026-11-04 against get_fields and get_data:
+#   google_ads budget_amount   - the campaign's daily budget on each date, major units.
+#                                Without `date` it sums across days, so date is required.
+#   bing       budget_amount   - current daily cap, major units
+#   facebook   campaign_daily_budget (CBO) / adset_daily_budget (ABO) - MINOR units (cents)
+#   reddit     ad_group_budget with ad_group_goal_type DAILY_SPEND, major units; or
+#              campaign_goal_value (micros) when campaign budget optimisation is on
+BUDGET_FIELDS = {
+    "google_ads": ["date", "campaign_id", "budget_amount"],
+    "bing":       ["date", "campaign_id", "budget_amount"],
+    "facebook":   ["date", "campaign_id", "adset_id", "campaign_daily_budget", "adset_daily_budget"],
+    "reddit":     ["date", "campaign_id", "campaign_is_campaign_budget_optimization",
+                   "campaign_goal_type", "campaign_goal_value",
+                   "ad_group_id", "ad_group_goal_type", "ad_group_budget"],
+}
+BUDGET_LOOKBACK_DAYS = 3   # today and the two days before: survives a quiet day
 
 CAMPAIGN_IDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "campaign_ids.json")
 # Share of Windsor MTD spend that must land on a tracker row before the digest warns.
@@ -81,7 +100,7 @@ COVERAGE_MIN = float(os.environ.get("PACING_COVERAGE_MIN", "0.98"))
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
 
-# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily, DERIVED_DAILY only), G(l30sp), H(l30cv).
+# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily budget), G(l30sp), H(l30cv).
 COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
          l30roas=9,iroas=10,ivsf=11,band=12,sugg=13,dbud=14,exp=15,pace=16,proj=17,
          action=18,grace=19,notes=20)
@@ -108,23 +127,24 @@ def daily_window():
     return start.isoformat(), TODAY.isoformat()
 
 # ================================================================ WINDSOR
-def windsor_cache_key(connector, fields, date_preset=None):
+def windsor_cache_key(connector, fields, date_preset=None, window=None):
     """
-    Stable name for one Windsor pull. The twelve calls this routine makes are fully
+    Stable name for one Windsor pull. The sixteen calls this routine makes are fully
     distinguished by connector + window, so the slash command can populate the cache
     without reconstructing argument tuples:
-        google_ads:mtd  google_ads:l30  google_ads:daily
-        bing:mtd        bing:l30        bing:daily
-        facebook:mtd    facebook:l30    facebook:daily
-        reddit:mtd      reddit:l30      reddit:daily
+        google_ads:mtd  google_ads:l30  google_ads:daily  google_ads:budget
+        bing:mtd        bing:l30        bing:daily        bing:budget
+        facebook:mtd    facebook:l30    facebook:daily    facebook:budget
+        reddit:mtd      reddit:l30      reddit:daily      reddit:budget
     """
-    if date_preset:            window = "l30"
+    if window:                 pass
+    elif date_preset:          window = "l30"
     elif "date" in fields:     window = "daily"
     else:                      window = "mtd"
     return f"{connector}:{window}"
 
 def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=None,
-                accounts=None, filters=None):
+                accounts=None, filters=None, window=None):
     """
     Resolve one Windsor pull. Two sources, in priority order:
 
@@ -140,7 +160,7 @@ def windsor_get(connector, fields, date_from=None, date_to=None, date_preset=Non
       facebook: spend, action_values_omni_purchase   (NOT conversions_value)
       reddit: spend, purchase_total_value             (verified 2026-10-30)
     """
-    key = windsor_cache_key(connector, fields, date_preset)
+    key = windsor_cache_key(connector, fields, date_preset, window)
 
     cache_path = os.environ.get("WINDSOR_CACHE")
     if cache_path and os.path.exists(cache_path):
@@ -198,6 +218,81 @@ def pull_platform_mtd_and_l30():
         merge(windsor_get(connector, fields, date_from=m, date_to=t, **sel), plat, connector, cv_f, "mtd")
         merge(windsor_get(connector, fields, date_preset="last_30d", **sel), plat, connector, cv_f, "l30")
     return out
+
+def _f(x):
+    try: return float(x)
+    except (TypeError, ValueError): return 0.0
+
+def daily_budgets_from_rows(connector, rows):
+    """
+    {campaign_id: daily budget in account currency} from one platform's budget rows.
+
+    Uses each campaign's latest date only, so a budget change shows up the day after it
+    is made rather than being averaged against the old value. Windsor does not collapse
+    repeated rows for these attribute fields, so values are deduplicated per entity
+    (campaign, ad set, ad group), never summed across rows.
+
+    A campaign is omitted when it has no daily budget to read - a Meta or Reddit
+    campaign on a lifetime budget, for instance. The caller decides the fallback.
+    """
+    latest = {}
+    for r in rows:
+        cid = r.get("campaign_id")
+        if cid:
+            d = r.get("date") or ""
+            if d > latest.get(cid, ""): latest[cid] = d
+    camp, child = {}, {}
+    for r in rows:
+        cid = r.get("campaign_id")
+        if not cid or (r.get("date") or "") != latest[cid]:
+            continue
+        if connector in ("google_ads", "bing"):
+            v = _f(r.get("budget_amount"))
+            if v > 0: camp[cid] = max(camp.get(cid, 0.0), v)
+        elif connector == "facebook":
+            v = _f(r.get("campaign_daily_budget")) / 100          # CBO, cents
+            if v > 0: camp[cid] = max(camp.get(cid, 0.0), v)
+            a = _f(r.get("adset_daily_budget")) / 100             # ABO, cents
+            if a > 0 and r.get("adset_id"):
+                child.setdefault(cid, {})[r["adset_id"]] = a
+        elif connector == "reddit":
+            if r.get("campaign_is_campaign_budget_optimization") and \
+               r.get("campaign_goal_type") == "DAILY_SPEND":
+                v = _f(r.get("campaign_goal_value")) / 1e6        # micros
+                if v > 0: camp[cid] = max(camp.get(cid, 0.0), v)
+            elif r.get("ad_group_goal_type") == "DAILY_SPEND" and r.get("ad_group_id"):
+                a = _f(r.get("ad_group_budget"))
+                if a > 0: child.setdefault(cid, {})[r["ad_group_id"]] = a
+    out = dict(camp)
+    for cid, kids in child.items():
+        out.setdefault(cid, sum(kids.values()))   # campaign-level budget wins if both
+    return out
+
+def pull_daily_budgets():
+    """
+    {"connector:campaign_id": daily budget} - the budget configured on platform, for
+    Pacing Tracker column F.
+
+    Column F used to be typed in by hand for Google and Microsoft and estimated as
+    L30D / 30 for Meta and Reddit, so it drifted whenever a budget changed on platform
+    (2026-10-30: the video row said $700/day against $450 in Google Ads). Reading it from
+    the platform each run removes the drift.
+
+    A platform whose budget pull fails is logged and skipped rather than failing the run:
+    a stale budget cell is a smaller problem than no refresh at all.
+    """
+    start = (TODAY - dt.timedelta(days=BUDGET_LOOKBACK_DAYS-1)).isoformat(); end = TODAY.isoformat()
+    out, failed = {}, []
+    for _plat, connector, sel, _cv in PLATFORMS:
+        try:
+            rows = windsor_get(connector, BUDGET_FIELDS[connector], date_from=start, date_to=end,
+                               window="budget", **sel)
+        except Exception as e:
+            print(f"  [!] budget pull failed for {connector}, column F left as is: {e}")
+            failed.append(connector); continue
+        for cid, v in daily_budgets_from_rows(connector, rows).items():
+            out[f"{connector}:{cid}"] = v
+    return out, failed
 
 def load_campaign_ids(path=CAMPAIGN_IDS_FILE):
     """{tracker row name: "connector:campaign_id"} from campaign_ids.json, or {} if absent."""
@@ -754,6 +849,7 @@ def main():
             f"Set PACING_ALLOW_MONTH_MISMATCH=1 to override.")
 
     data=pull_platform_mtd_and_l30()
+    budgets, budget_failed = pull_daily_budgets()
     daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
     daily_all=pull_daily_spend_all_platforms() # all platforms -> pacing curve series
 
@@ -781,6 +877,7 @@ def main():
     skipped={n for n, _ in dupes}
     cells=[]
     matched=[]; zeroed=[]
+    budget_set=[]; budget_approx=[]; budget_kept=[]
     for name,wrow in row_for.items():
         if name in skipped:
             continue
@@ -797,8 +894,15 @@ def main():
         cells.append(gspread.Cell(wrow,COL["mtd"],   round(d["mtd_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30sp"], round(d["l30_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30cv"], round(d["l30_cv"],2)))
-        if platform_of[name] in DERIVED_DAILY:
+        # Daily budget: the platform's configured budget when there is one to read.
+        bud = budgets.get(key) if key else None
+        if bud is not None:
+            cells.append(gspread.Cell(wrow,COL["daily"], round(bud,2))); budget_set.append(name)
+        elif platform_of[name] in DERIVED_DAILY:
             cells.append(gspread.Cell(wrow,COL["daily"], round(d["l30_spend"]/30,2)))
+            budget_approx.append(name)
+        else:
+            budget_kept.append(name)
 
     # Reconciliation, printed every run and summarised in the digest.
     claimed=set(resolved.values())
@@ -816,6 +920,13 @@ def main():
         print(f"  [-] no Windsor data, written as $0                 : {n}")
     for k, d in unclaimed:
         print(f"  [!] in Windsor, no tracker row : {d['name']}  ({k}, ${d['mtd_spend']:,.0f} MTD)")
+    print(f"[budget] col F from platform budget: {len(budget_set)} rows; "
+          f"L30D/30 fallback: {len(budget_approx)}; left as is: {len(budget_kept)}"
+          + (f"  (budget pull failed: {', '.join(budget_failed)})" if budget_failed else ""))
+    for n in budget_approx:
+        print(f"  [~] no daily budget on platform, L30D/30 written : {n}")
+    for n in budget_kept:
+        print(f"  [-] no daily budget on platform, col F unchanged : {n}")
 
     if cells and not DRY_RUN:
         tracker.update_cells(cells, value_input_option="USER_ENTERED")
@@ -958,6 +1069,9 @@ def main():
         if unresolved:
             out.append(f":warning: {len(unresolved)} tracker row(s) not tied to a campaign ID, "
                        f"so they read $0: " + ", ".join(unresolved[:4]))
+        if budget_failed:
+            out.append(f":warning: Daily budget pull failed for {', '.join(budget_failed)}; "
+                       f"those rows' Daily Budget column was not refreshed.")
         return out
 
     def _x(v):

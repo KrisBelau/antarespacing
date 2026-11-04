@@ -37,6 +37,7 @@ t = d.date.today()
 prev = (t.replace(day=1) - d.timedelta(days=1)).replace(day=1)
 print(f'MONTH_START={t.replace(day=1)}')
 print(f'TODAY={t}')
+print(f'BUDGET_START={t - d.timedelta(days=2)}')
 print(f'DAILY_START={min(prev - d.timedelta(days=29), t - d.timedelta(days=29))}')"
 ```
 
@@ -46,9 +47,9 @@ on the 1st of last month instead of ramping up from nothing. The routine's
 `daily_window()` computes exactly this union; feeding it a shorter window silently
 truncates last month. Every consumer narrows the window itself.
 
-## Step 2 — pull the twelve Windsor datasets
+## Step 2 — pull the sixteen Windsor datasets
 
-Call `mcp__Windsor_ai__get_data` twelve times. Field names below are verified against
+Call `mcp__Windsor_ai__get_data` sixteen times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
 `action_values_omni_purchase`, *not* `conversions_value`.
 
@@ -70,13 +71,23 @@ across its old and new names, and the routine refuses rows that have no ID.
 | `reddit:mtd` | `reddit` | `campaign_id, campaign, spend, purchase_total_value` | `date_from=MONTH_START`, `date_to=TODAY`, `accounts=["a2_esoyaxwp5glg"]` |
 | `reddit:l30` | `reddit` | `campaign_id, campaign, spend, purchase_total_value` | `date_preset="last_30d"`, same account |
 | `reddit:daily` | `reddit` | `date, spend, purchase_total_value` | `date_from=DAILY_START`, `date_to=TODAY`, same account |
+| `google_ads:budget` | `google_ads` | `date, campaign_id, budget_amount` | `date_from=BUDGET_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
+| `bing:budget` | `bing` | `date, campaign_id, budget_amount` | `date_from=BUDGET_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
+| `facebook:budget` | `facebook` | `date, campaign_id, adset_id, campaign_daily_budget, adset_daily_budget` | `date_from=BUDGET_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
+| `reddit:budget` | `reddit` | `date, campaign_id, campaign_is_campaign_budget_optimization, campaign_goal_type, campaign_goal_value, ad_group_id, ad_group_goal_type, ad_group_budget` | `date_from=BUDGET_START`, `date_to=TODAY`, `accounts=["a2_esoyaxwp5glg"]` |
 
 The four `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
 iROAS Daily tab, which is why they carry each platform's conversion-value field too.
 Google's also feeds the lag gross-up — Google only, because the maturation curve comes
 from the Google Time Lag report.
 
-Write all twelve result arrays into one JSON file keyed exactly as above:
+The four `:budget` pulls feed the Daily Budget column (F). **`date` is required** on them:
+Google's `budget_amount` sums across days without it, and the routine takes each
+campaign's latest date so a budget change lands the next run. Meta budgets come back in
+cents; the routine converts. A missing or failed `:budget` key does not stop the run —
+those rows' column F is left as it is and the digest says so.
+
+Write all sixteen result arrays into one JSON file keyed exactly as above:
 
 ```json
 { "google_ads:mtd": [ {...}, ... ], "google_ads:l30": [ ... ], ... }
@@ -87,7 +98,7 @@ Save it to `/tmp/windsor_cache.json`.
 **Sanity-check before continuing.** If any of these fail, stop and report rather than
 writing partial data to a live client sheet:
 
-- all twelve keys present. Every key must be non-empty **except the three `bing:*` keys**:
+- all sixteen keys present. Every key must be non-empty **except the four `bing:*` keys**:
   Microsoft Ads has been paused since 2026-10-06, so `bing:mtd` is empty from Nov 1 and
   `bing:l30` from about Nov 5. Empty Bing is expected; any other empty key, stop.
 - each `:daily` key has ~30 rows, one per date
@@ -109,8 +120,10 @@ python3 pacing_tracker_daily.py
 The script writes only these cells, exactly as before:
 
 - `Pacing Tracker` **E** (MTD spend), **G** (L30D spend), **H** (L30D conv value) per campaign
-- `Pacing Tracker` **F** (daily budget) for Meta and Reddit rows only — both are set up
-  without a fixed daily budget in the sheet, so the baseline is approximated as L30D ÷ 30
+- `Pacing Tracker` **F** (daily budget) — the budget configured on platform, for every
+  platform. Where a campaign has no daily budget to read (lifetime budget, or no delivery
+  in the last three days), Meta and Reddit rows fall back to L30D ÷ 30 and Google /
+  Microsoft rows are left as they are
 - A tracker row with no Windsor data this run gets **$0** in E/G/H, not the previous
   run's numbers (unless its whole platform returned nothing — then it is left alone)
 - `Config` C65 — spend-weighted lag gross-up
@@ -137,6 +150,9 @@ The script prints a reconciliation block. **Read it before posting.**
   - `no Windsor data, written as $0` — the campaign did not spend in either window.
     Expected for paused campaigns.
 - `[coverage] ... (NN.N%)` — share of Windsor MTD spend that lands on a tracker row.
+- `[budget] col F from platform budget: N rows; L30D/30 fallback: N; left as is: N` —
+  rows under "left as is" still carry a hand-entered budget; check they are paused or
+  lifetime-budget campaigns, not a broken pull.
 - `[timelag] ... skipped` — a Time Lag export was found but its window isn't matured
   (< 28 days). This is correct behavior; the existing curve is kept. Mention it in your
   summary but do not override it.
