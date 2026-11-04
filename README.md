@@ -22,7 +22,7 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 | Target | Cells |
 |---|---|
 | `Pacing Tracker` | **E** MTD spend, **G** L30D spend, **H** L30D conv value (per campaign row; $0 when the campaign has no Windsor data) |
-| `Pacing Tracker` | **F** daily budget — *Meta and Reddit rows only*, approximated as L30D ÷ 30 (Meta uses CBO/lifetime budgets; Reddit rows were set up the same way) |
+| `Pacing Tracker` | **F** daily budget — read from each platform's configured budget (Google/Microsoft `budget_amount`, Meta campaign or ad-set daily budget, Reddit daily ad-group or campaign budget), latest of the last three days. No daily budget to read: Meta/Reddit fall back to L30D ÷ 30, Google/Microsoft are left as is |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
 | `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
@@ -371,9 +371,13 @@ fit for Reddit rows.
 
 ## Known gaps
 
-- **Google daily budgets (column F) are entered by hand** and drift. On 2026-10-30 the
-  video campaign's row said $700/day against a $450 budget in Google Ads, which overstates
-  its Cut or Fix line.
+- **Daily budget (column F) follows the platform from 2026-11-04.** Before that, Google
+  and Microsoft budgets were entered by hand and drifted (2026-10-30: the video row said
+  $700/day against $450 in Google Ads), and Meta/Reddit were estimated as L30D ÷ 30. It
+  is the *configured* budget: a paused campaign that delivered in the last three days
+  still shows its budget, and a campaign that has not delivered in three days drops out
+  of the pull (Meta/Reddit then fall back to L30D ÷ 30; Google/Microsoft keep the old
+  cell). Lifetime-budget Meta campaigns have no daily figure and always use the fallback.
 - **The video campaign is judged on purchase iROAS.** It is a Views campaign, so it reads
   0.00x and sits in Cut or Fix whatever it does. Whether it belongs in the model is a
   modelling decision, not a data fix.
