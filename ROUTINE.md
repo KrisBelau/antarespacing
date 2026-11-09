@@ -25,15 +25,14 @@ built this way and do carry connectors — same pattern, same time slot.
 
 | | |
 |---|---|
-| Schedule | `0 14 * * *` (UTC) = 07:00 Pacific during PDT |
+| Schedule | `0 13 * * *` (UTC) = 05:00 Pacific in PST, 06:00 in PDT (live setting, checked 2026-11-09) |
 | Repository | `KrisBelau/antarespacing` |
 | Connectors | Windsor.ai, Slack, Google Drive |
 | Notifications | push, so a failed run surfaces |
 
-**Daylight saving:** cron is UTC and does not follow it. `0 14` is 07:00 PDT but becomes
-06:00 PST when DST ends (2026-11-01). Change to `0 15 * * *` then, back to `0 14` in
-March. Consider `0 14 * * 1-5` if weekend runs are noise — spend still accrues at
-weekends, so the curve simply catches up on Monday.
+**Daylight saving:** cron is UTC and does not follow it, so the run moved from 06:00 to
+05:00 Pacific when DST ended on 2026-11-01. Consider `0 13 * * 1-5` if weekend runs are
+noise — spend still accrues at weekends, so the curve simply catches up on Monday.
 
 ## Prompt
 
@@ -43,11 +42,19 @@ stop rule must not go live before the code that implements them is merged. A ses
 **cannot** edit it: the task was created in the UI, and agents may only edit tasks they
 created. Edit it at https://claude.ai/code/routines/trig_011uEEi3kLiMMuSG8Viti7Nn.
 
+**The live prompt is not the block below.** Checked 2026-11-09, the task still carries
+the version last edited 2026-10-22: it names "the nine Windsor.ai pulls", stops if any of
+them returns empty, and stops if "fewer than ~40 of the 45 campaign rows match by name".
+None of that matches the code any more (twenty pulls, empty Microsoft pulls expected,
+rows matched by campaign ID, a coverage check instead of a row count). Runs still succeed
+because the prompt hands off to the command file, but the stop rules it states are not
+the ones the command file checks. Paste the block below in to bring them back in line.
+
 ```
 Daily Antares / AutoTune paid-media pacing refresh.
 
 The authoritative procedure is `.claude/commands/antares-pacing-refresh.md` in this repo
-(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the sixteen
+(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the twenty
 Windsor.ai pulls, the run command, and the Slack post.
 
 PREREQUISITE the command file does not cover: the Google service-account key is
@@ -66,7 +73,7 @@ private, non-shared channel — #antares-pacing (C0BPYHZUH9S) is an external Sla
 Connect channel and rejects bot-posted messages.
 
 STOP AND DO NOT POST if any of these are true — report the failure instead:
-  - any Windsor pull other than the four bing:* pulls returns empty (Microsoft Ads is
+  - any Windsor pull other than the bing:* pulls returns empty (Microsoft Ads is
     paused, so empty Bing is expected)
   - the Sheet is unreachable or the service account gets a 403
   - the [coverage] line shows less than 98% of MTD spend landing on a tracker row

@@ -47,9 +47,9 @@ on the 1st of last month instead of ramping up from nothing. The routine's
 `daily_window()` computes exactly this union; feeding it a shorter window silently
 truncates last month. Every consumer narrows the window itself.
 
-## Step 2 — pull the sixteen Windsor datasets
+## Step 2 — pull the twenty Windsor datasets
 
-Call `mcp__Windsor_ai__get_data` sixteen times. Field names below are verified against
+Call `mcp__Windsor_ai__get_data` twenty times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
 `action_values_omni_purchase`, *not* `conversions_value`.
 
@@ -75,6 +75,10 @@ across its old and new names, and the routine refuses rows that have no ID.
 | `bing:budget` | `bing` | `date, campaign_id, budget_amount` | `date_from=BUDGET_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
 | `facebook:budget` | `facebook` | `date, campaign_id, adset_id, campaign_daily_budget, adset_daily_budget` | `date_from=BUDGET_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
 | `reddit:budget` | `reddit` | `date, campaign_id, campaign_is_campaign_budget_optimization, campaign_goal_type, campaign_goal_value, ad_group_id, ad_group_goal_type, ad_group_budget` | `date_from=BUDGET_START`, `date_to=TODAY`, `accounts=["a2_esoyaxwp5glg"]` |
+| `google_ads:status` | `google_ads` | `campaign_id, campaign_status` | `date_preset="last_90d"`, `accounts=["802-485-7603"]` |
+| `bing:status` | `bing` | `campaign_id, campaign_status` | `date_preset="last_90d"`, `filters=[["account_name","eq","Antares Adwords"]]` |
+| `facebook:status` | `facebook` | `campaign_id, campaign_effective_status, campaign_stop_time` | `date_preset="last_90d"`, `filters=[["account_name","eq","Antares Ads"]]` |
+| `reddit:status` | `reddit` | `campaign_id, campaign_effective_status` | `date_preset="last_90d"`, `accounts=["a2_esoyaxwp5glg"]` |
 
 The four `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
 iROAS Daily tab, which is why they carry each platform's conversion-value field too.
@@ -87,7 +91,15 @@ campaign's latest date so a budget change lands the next run. Meta budgets come 
 cents; the routine converts. A missing or failed `:budget` key does not stop the run —
 those rows' column F is left as it is and the digest says so.
 
-Write all sixteen result arrays into one JSON file keyed exactly as above:
+The four `:status` pulls feed the **Platform Status** column. **Do not add `date`** to
+them: Windsor resolves status at query time (verified 2026-11-09 — Microsoft rows from
+Aug 1 read "Paused" for campaigns paused on Oct 6), so an undated pull returns one row per
+campaign, ~40–50 rows, with its current status. The 90-day window is there so a campaign
+paused weeks ago still comes back as Paused rather than dropping out. The Meta call can
+time out on its first attempt; repeat the identical call. A missing or failed `:status` key
+does not stop the run — that platform's status cells are left as they are.
+
+Write all twenty result arrays into one JSON file keyed exactly as above:
 
 ```json
 { "google_ads:mtd": [ {...}, ... ], "google_ads:l30": [ ... ], ... }
@@ -98,7 +110,7 @@ Save it to `/tmp/windsor_cache.json`.
 **Sanity-check before continuing.** If any of these fail, stop and report rather than
 writing partial data to a live client sheet:
 
-- all sixteen keys present. Every key must be non-empty **except the four `bing:*` keys**:
+- all twenty keys present. Every key must be non-empty **except the `bing:*` keys**:
   Microsoft Ads has been paused since 2026-10-06, so `bing:mtd` is empty from Nov 1 and
   `bing:l30` from about Nov 5. Empty Bing is expected; any other empty key, stop.
 - each `:daily` key has ~30 rows, one per date
@@ -117,7 +129,7 @@ PACING_SLACK='#antares-pacing-internal' \
 python3 pacing_tracker_daily.py
 ```
 
-The script writes only these cells, exactly as before:
+The script writes only these cells:
 
 - `Pacing Tracker` **E** (MTD spend), **G** (L30D spend), **H** (L30D conv value) per campaign
 - `Pacing Tracker` **F** (daily budget) — the budget configured on platform, for every
@@ -126,6 +138,11 @@ The script writes only these cells, exactly as before:
   Microsoft rows are left as they are
 - A tracker row with no Windsor data this run gets **$0** in E/G/H, not the previous
   run's numbers (unless its whole platform returned nothing — then it is left alone)
+- `Pacing Tracker` **Platform Status** — every row, every run: Active / Paused / Removed /
+  Ended (Meta past its stop time) / Budget-limited (Microsoft out of budget for the day),
+  `No delivery (90d)` when the campaign is in none of the `:status` pulls, `No campaign ID`
+  for an unmapped row. Found by its header in row 2; on the first run with this code the
+  header does not exist yet and is added in the first free column past the last header (Z)
 - `Config` C65 — spend-weighted lag gross-up
 - `Config` C77 — last-run stamp
 - `Pacing Curve` D3:D(last day of month) — cumulative spend through today, and the
@@ -153,6 +170,10 @@ The script prints a reconciliation block. **Read it before posting.**
 - `[budget] col F from platform budget: N rows; L30D/30 fallback: N; left as is: N` —
   rows under "left as is" still carry a hand-entered budget; check they are paused or
   lifetime-budget campaigns, not a broken pull.
+- `[status] col Z: Active N, Paused N, ...` — counts per status. `status changed since last
+  run` lines name every row that flipped; those also go in the digest. Rows Paused, Removed
+  or Ended are left out of the digest's queues, and any that still carry L30D spend are
+  named in one line under the queues, so nothing drops out silently.
 - `[timelag] ... skipped` — a Time Lag export was found but its window isn't matured
   (< 28 days). This is correct behavior; the existing curve is kept. Mention it in your
   summary but do not override it.
