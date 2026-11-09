@@ -18,6 +18,8 @@ What this routine does each morning:
   3. Write per-campaign raw data into the Pacing Tracker tab (cols E,F,G,H). A row with
      no Windsor data is written as $0 rather than left holding an old run's numbers. The sheet's
      own formulas recompute lag-adjusted ROAS, iROAS, bands, suggested budgets, headline.
+     Each row's on-platform status (Active / Paused / ...) is rewritten in the Platform
+     Status column every run - see pull_campaign_status().
   4. Write the spend-weighted multiplier into Config so lag adjustment stays current.
   5. Rewrite the whole month-to-date cumulative spend series in Pacing Curve, so the
      column self-heals after a missed run or a platform restatement.
@@ -93,6 +95,33 @@ BUDGET_FIELDS = {
 }
 BUDGET_LOOKBACK_DAYS = 3   # today and the two days before: survives a quiet day
 
+# Platform Status column on Pacing Tracker - see pull_campaign_status().
+# Verified live 2026-11-09 against get_fields and get_data. Windsor resolves these at
+# query time, not per cached day: Microsoft rows from 2026-08-01 read "Paused" for
+# campaigns paused on 2026-10-06. So an undated pull returns one row per campaign that
+# delivered in the window, carrying its CURRENT status, and the window only has to reach
+# back far enough to include campaigns that went dark a while ago.
+#   google_ads campaign_status            ENABLED / PAUSED / REMOVED
+#   bing       campaign_status            Active / Paused / BudgetPaused / ... / Deleted
+#   facebook   campaign_effective_status  ACTIVE / PAUSED / ARCHIVED / DELETED / ...
+#              campaign_stop_time         a lifetime-budget campaign past its stop time
+#                                         still reads ACTIVE, so the stop time is needed
+#   reddit     campaign_effective_status  ACTIVE / PAUSED / ...
+STATUS_FIELDS = {
+    "google_ads": ["campaign_id", "campaign_status"],
+    "bing":       ["campaign_id", "campaign_status"],
+    "facebook":   ["campaign_id", "campaign_effective_status", "campaign_stop_time"],
+    "reddit":     ["campaign_id", "campaign_effective_status"],
+}
+STATUS_PRESET = "last_90d"
+STATUS_HEADER = "Platform Status"
+STATUS_HEADER_ALIASES = {"platform status", "campaign status", "status"}
+# Statuses that take a row out of the digest's review queues: nobody can act on a budget
+# suggestion for a campaign that is not running.
+STATUS_OFF = {"Paused", "Removed", "Ended"}
+STATUS_NO_DELIVERY = "No delivery (90d)"
+STATUS_NO_ID = "No campaign ID"
+
 CAMPAIGN_IDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "campaign_ids.json")
 # Share of Windsor MTD spend that must land on a tracker row before the digest warns.
 COVERAGE_MIN = float(os.environ.get("PACING_COVERAGE_MIN", "0.98"))
@@ -100,7 +129,8 @@ COVERAGE_MIN = float(os.environ.get("PACING_COVERAGE_MIN", "0.98"))
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
 
-# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily budget), G(l30sp), H(l30cv).
+# Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily budget), G(l30sp), H(l30cv),
+# plus Platform Status, which is found by its header (find_status_column) rather than fixed here.
 COL=dict(platform=1,campaign=2,ctype=3,factor=4,mtd=5,daily=6,l30sp=7,l30cv=8,
          l30roas=9,iroas=10,ivsf=11,band=12,sugg=13,dbud=14,exp=15,pace=16,proj=17,
          action=18,grace=19,notes=20)
@@ -129,13 +159,13 @@ def daily_window():
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None, window=None):
     """
-    Stable name for one Windsor pull. The sixteen calls this routine makes are fully
+    Stable name for one Windsor pull. The twenty calls this routine makes are fully
     distinguished by connector + window, so the slash command can populate the cache
     without reconstructing argument tuples:
-        google_ads:mtd  google_ads:l30  google_ads:daily  google_ads:budget
-        bing:mtd        bing:l30        bing:daily        bing:budget
-        facebook:mtd    facebook:l30    facebook:daily    facebook:budget
-        reddit:mtd      reddit:l30      reddit:daily      reddit:budget
+        google_ads:mtd  google_ads:l30  google_ads:daily  google_ads:budget  google_ads:status
+        bing:mtd        bing:l30        bing:daily        bing:budget        bing:status
+        facebook:mtd    facebook:l30    facebook:daily    facebook:budget    facebook:status
+        reddit:mtd      reddit:l30      reddit:daily      reddit:budget      reddit:status
     """
     if window:                 pass
     elif date_preset:          window = "l30"
@@ -293,6 +323,136 @@ def pull_daily_budgets():
         for cid, v in daily_budgets_from_rows(connector, rows).items():
             out[f"{connector}:{cid}"] = v
     return out, failed
+
+def status_label(connector, row, now=None):
+    """
+    One platform status row -> the label written to the tracker.
+
+    Active / Paused / Removed / Ended cover what the queues need to know. Anything else
+    (Meta WITH_ISSUES, Microsoft Suspended, ...) is passed through readably rather than
+    forced into one of those, so an unusual state is visible instead of mislabelled.
+    """
+    raw = str(row.get("campaign_effective_status") or row.get("campaign_status") or "").strip()
+    u = raw.upper().replace(" ", "_")
+    if connector == "facebook" and u == "ACTIVE" and row.get("campaign_stop_time"):
+        try:
+            stop = dt.datetime.strptime(str(row["campaign_stop_time"]), "%Y-%m-%dT%H:%M:%S%z")
+            if stop <= (now or dt.datetime.now(dt.timezone.utc)):
+                return "Ended"
+        except ValueError:
+            pass
+    if u in ("ENABLED", "ACTIVE"):
+        return "Active"
+    if u == "BUDGETPAUSED":
+        # Microsoft: out of budget for the day, resumes on its own. Still running.
+        return "Budget-limited"
+    if "PAUSED" in u:          # PAUSED, Paused, BudgetAndManualPaused
+        return "Paused"
+    if u in ("REMOVED", "DELETED", "ARCHIVED"):
+        return "Removed"
+    if u == "COMPLETED":
+        return "Ended"
+    return raw.replace("_", " ").capitalize() or "Unknown"
+
+def statuses_from_rows(connector, rows, now=None):
+    """
+    {campaign_id: label} from one platform's status pull.
+
+    The pull is undated, so each campaign should come back once. If Windsor ever returns
+    one campaign under two statuses there is no date to pick the newer one by, so the
+    label says so rather than guessing; it is not in STATUS_OFF, so the row stays in the
+    queues.
+    """
+    seen = {}
+    for r in rows:
+        cid = r.get("campaign_id")
+        if cid:
+            seen.setdefault(str(cid), set()).add(status_label(connector, r, now))
+    return {cid: (next(iter(labs)) if len(labs) == 1 else f"Unclear ({'/'.join(sorted(labs))})")
+            for cid, labs in seen.items()}
+
+def pull_campaign_status():
+    """
+    {"connector:campaign_id": status label} for the Platform Status column, plus the
+    connectors whose pull failed.
+
+    Before this the routine had no idea whether a campaign was running. It inferred
+    "paused" from zero L30D spend, which lags a pause by 30 days: the video campaign was
+    paused on 2026-11-04 and would have sat at the top of Cut or Fix until December.
+
+    A campaign missing from a successful pull did not deliver in STATUS_PRESET; the
+    caller labels it that way rather than guessing paused or active. A failed pull is
+    logged and skipped, leaving that platform's cells as they were.
+    """
+    out, failed = {}, []
+    for _plat, connector, sel, _cv in PLATFORMS:
+        try:
+            rows = windsor_get(connector, STATUS_FIELDS[connector], date_preset=STATUS_PRESET,
+                               window="status", **sel)
+        except Exception as e:
+            print(f"  [!] status pull failed for {connector}, Platform Status left as is: {e}")
+            failed.append(connector); continue
+        for cid, lab in statuses_from_rows(connector, rows).items():
+            out[f"{connector}:{cid}"] = lab
+    return out, failed
+
+def status_updates(row_for, platform_of, resolved, statuses, failed, skip=()):
+    """
+    {row name: label} for every tracker row whose Platform Status can be set this run.
+
+    Every row is rewritten each run, so a pause or a re-enable shows up the next morning.
+    Rows on a platform whose status pull failed, and duplicate rows the spend write also
+    skips, are left out so their cells keep the previous value.
+    """
+    connector_of = {plat: connector for plat, connector, _sel, _cv in PLATFORMS}
+    out = {}
+    for name in row_for:
+        if name in skip:
+            continue
+        key = resolved.get(name)
+        connector = key.split(":", 1)[0] if key else connector_of.get(platform_of.get(name, ""))
+        if connector in failed:
+            continue
+        if not key:
+            out[name] = STATUS_NO_ID
+        else:
+            out[name] = statuses.get(key, STATUS_NO_DELIVERY)
+    return out
+
+def find_status_column(tracker):
+    """
+    Column holding Platform Status, found by its header in the header row, or the first
+    free column past the last header if there is none yet. Returns (column, exists).
+
+    Found by header rather than fixed, so the column can be moved in the Sheet without
+    breaking the routine.
+    """
+    hdr = tracker.row_values(DATA_START_ROW - 1)
+    for i, v in enumerate(hdr, 1):
+        if str(v).strip().lower() in STATUS_HEADER_ALIASES:
+            return i, True
+    return len(hdr) + 1, False
+
+def create_status_column(sh, tracker, col):
+    """
+    Add the Platform Status header at `col`, styled like the header to its left.
+
+    Refuses if anything is already in that column: a header row that ends early does not
+    prove the column is empty below it.
+    """
+    if col > tracker.col_count:
+        tracker.add_cols(col - tracker.col_count)
+    elif any(str(v).strip() for v in tracker.col_values(col)):
+        raise RuntimeError(f"column {gspread.utils.rowcol_to_a1(1, col)[:-1]} is past the last "
+                           f"header but not empty; add a '{STATUS_HEADER}' header by hand")
+    hdr_row = DATA_START_ROW - 1
+    sh.batch_update({"requests": [{"copyPaste": {
+        "source":      {"sheetId": tracker.id, "startRowIndex": hdr_row - 1, "endRowIndex": hdr_row,
+                        "startColumnIndex": col - 2, "endColumnIndex": col - 1},
+        "destination": {"sheetId": tracker.id, "startRowIndex": hdr_row - 1, "endRowIndex": hdr_row,
+                        "startColumnIndex": col - 1, "endColumnIndex": col},
+        "pasteType": "PASTE_FORMAT"}}]})
+    tracker.update_cell(hdr_row, col, STATUS_HEADER)
 
 def load_campaign_ids(path=CAMPAIGN_IDS_FILE):
     """{tracker row name: "connector:campaign_id"} from campaign_ids.json, or {} if absent."""
@@ -850,6 +1010,7 @@ def main():
 
     data=pull_platform_mtd_and_l30()
     budgets, budget_failed = pull_daily_budgets()
+    statuses, status_failed = pull_campaign_status()
     daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
     daily_all=pull_daily_spend_all_platforms() # all platforms -> pacing curve series
 
@@ -931,6 +1092,43 @@ def main():
     if cells and not DRY_RUN:
         tracker.update_cells(cells, value_input_option="USER_ENTERED")
     print(f"[write] {len(cells)} cells -> Pacing Tracker" + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
+
+    # Platform Status: every row rewritten each run, including rows on a platform whose
+    # spend pull came back empty (Microsoft) - status is still known for those. Written
+    # separately from the spend cells so a problem here cannot stop the spend refresh.
+    status_new = status_updates(row_for, platform_of, resolved, statuses, status_failed, skipped)
+    status_prev, status_changes, status_write_error = {}, [], None
+    status_col, status_exists = find_status_column(tracker)
+    status_a1 = gspread.utils.rowcol_to_a1(1, status_col)[:-1]
+    if status_exists:
+        prev_vals = tracker.col_values(status_col)
+        status_prev = {n: (prev_vals[r-1].strip() if r-1 < len(prev_vals) else "")
+                       for n, r in row_for.items()}
+        status_changes = [(n, status_prev[n], s) for n, s in status_new.items()
+                          if status_prev.get(n) and status_prev[n] != s]
+    counts = {}
+    for s in status_new.values():
+        counts[s] = counts.get(s, 0) + 1
+    print(f"[status] col {status_a1}"
+          + ("" if status_exists else f" (no '{STATUS_HEADER}' header yet - "
+             + ("would be created" if DRY_RUN else "creating it") + ")")
+          + ": " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+          + (f"  (status pull failed: {', '.join(status_failed)}; those rows left as is)"
+             if status_failed else ""))
+    for n, old, new in status_changes:
+        print(f"  [~] status changed since last run: {n}  {old} -> {new}")
+    if status_new and not DRY_RUN:
+        try:
+            if not status_exists:
+                create_status_column(sh, tracker, status_col)
+            tracker.update_cells([gspread.Cell(row_for[n], status_col, s) for n, s in status_new.items()],
+                                 value_input_option="RAW")
+            print(f"[write] {len(status_new)} cells -> Pacing Tracker {STATUS_HEADER} ({status_a1})")
+        except Exception as e:
+            status_write_error = str(e)
+            print(f"  [!] Platform Status not written: {e}")
+    # What the queues filter on: this run's value where there is one, else the sheet's.
+    status_now = {**status_prev, **status_new}
 
     if not DRY_RUN: write_multiplier(cfg,mult)
 
@@ -1072,6 +1270,15 @@ def main():
         if budget_failed:
             out.append(f":warning: Daily budget pull failed for {', '.join(budget_failed)}; "
                        f"those rows' Daily Budget column was not refreshed.")
+        if status_failed:
+            out.append(f":warning: Status pull failed for {', '.join(status_failed)}; "
+                       f"those rows' {STATUS_HEADER} was not refreshed.")
+        if status_write_error:
+            out.append(f":warning: {STATUS_HEADER} column could not be written this run.")
+        if status_changes:
+            shown = "; ".join(f"{n[:40].rstrip()} {old} \u2192 {new}" for n, old, new in status_changes[:4])
+            more = f" +{len(status_changes)-4} more" if len(status_changes) > 4 else ""
+            out.append(f":information_source: Status changed since last run: {shown}{more}")
         return out
 
     def _x(v):
@@ -1104,6 +1311,7 @@ def main():
 
     queues = defaultdict(list)  # action -> list of (campaign, cur, sug, iroas)
     inactive = 0
+    off_platform = []           # (campaign, action, status): not running, but still has L30D spend
     for row in st_rows[2:]:
         if len(row) < 6:
             continue
@@ -1111,9 +1319,18 @@ def main():
         if action not in ("Cut or Fix", "Raise", "Reduce"):
             continue
         camp = row[1]
+        has_l30 = l30_by_campaign.get(camp, 1.0) > 0
+        # Paused or ended on platform: a budget suggestion for it is not a decision anyone
+        # can act on. Before the status pull, the only signal was zero L30D spend, which
+        # lags a pause by 30 days. Rows that still carry spend are named in the digest,
+        # so taking them out of a queue is never silent.
+        if status_now.get(camp) in STATUS_OFF:
+            if has_l30: off_platform.append((camp, action, status_now[camp]))
+            else:       inactive += 1
+            continue
         # No L30D spend: the campaign is paused or gone. Its 0.00x lands it in Cut or Fix
         # every day, which buries the real decisions under rows nobody can act on.
-        if camp in l30_by_campaign and l30_by_campaign[camp] <= 0:
+        if not has_l30:
             inactive += 1
             continue
         # .get() returns None for a name absent from the tracker, which is a real
@@ -1176,6 +1393,11 @@ def main():
     lines += queue_block("Cut or Fix", ":mag: *Cut or Fix* (below 1.0x — diagnose tracking/LP/approvals/audience first)")
     lines += queue_block("Raise", ":arrow_up: *Raise if volume available* (ranked by iROAS; ceiling lift, credit only if spend lands)", by_iroas=True)
     lines += queue_block("Reduce", ":arrow_down: *Reduce* (below waterline; right-size down)")
+    if off_platform:
+        shown = ", ".join(f"{c[:40].rstrip()} ({s.lower()}, was {a})" for c, a, s in off_platform[:3])
+        more = f" +{len(off_platform)-3} more" if len(off_platform) > 3 else ""
+        lines.append(f"_{len(off_platform)} campaign(s) paused or ended on platform left out of "
+                     f"the queues: {shown}{more}_")
     if inactive:
         lines.append(f"_{inactive} rows with no L30D spend left out of the queues (paused or ended)._")
     post_slack("\n".join(lines))

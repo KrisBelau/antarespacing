@@ -47,7 +47,7 @@ created. Edit it at https://claude.ai/code/routines/trig_011uEEi3kLiMMuSG8Viti7N
 Daily Antares / AutoTune paid-media pacing refresh.
 
 The authoritative procedure is `.claude/commands/antares-pacing-refresh.md` in this repo
-(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the sixteen
+(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the twenty
 Windsor.ai pulls, the run command, and the Slack post.
 
 PREREQUISITE the command file does not cover: the Google service-account key is
@@ -66,7 +66,7 @@ private, non-shared channel — #antares-pacing (C0BPYHZUH9S) is an external Sla
 Connect channel and rejects bot-posted messages.
 
 STOP AND DO NOT POST if any of these are true — report the failure instead:
-  - any Windsor pull other than the four bing:* pulls returns empty (Microsoft Ads is
+  - any Windsor pull other than the bing:* pulls returns empty (Microsoft Ads is
     paused, so empty Bing is expected)
   - the Sheet is unreachable or the service account gets a 403
   - the [coverage] line shows less than 98% of MTD spend landing on a tracker row

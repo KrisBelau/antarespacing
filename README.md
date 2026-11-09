@@ -23,6 +23,7 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 |---|---|
 | `Pacing Tracker` | **E** MTD spend, **G** L30D spend, **H** L30D conv value (per campaign row; $0 when the campaign has no Windsor data) |
 | `Pacing Tracker` | **F** daily budget — read from each platform's configured budget (Google/Microsoft `budget_amount`, Meta campaign or ad-set daily budget, Reddit daily ad-group or campaign budget), latest of the last three days. No daily budget to read: Meta/Reddit fall back to L30D ÷ 30, Google/Microsoft are left as is |
+| `Pacing Tracker` | **Platform Status** (column found by header; created at **Z** on first run) — each campaign's on-platform status, every row, every run. See [Platform Status](#platform-status) |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
 | `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
@@ -369,13 +370,50 @@ the Config table, because the D formula only knows Google, Meta and Microsoft. A
 Reddit's attribution window is not Google's, so the Google-derived lag gross-up is a rough
 fit for Reddit rows.
 
+## Platform Status
+
+Each run rewrites every tracker row's on-platform status: **Active**, **Paused**,
+**Removed**, **Ended**, **Budget-limited**, `No delivery (90d)` or `No campaign ID`. Anything
+else a platform reports (Meta `WITH_ISSUES`, Microsoft `Suspended`) is passed through as is
+rather than forced into one of those.
+
+Before this the routine never knew whether a campaign was running. The digest inferred
+"paused" from zero L30D spend, which trails a pause by 30 days: the video campaign was
+paused on 2026-11-04 and would have stayed at the top of Cut or Fix into December. Rows
+that are Paused, Removed or Ended now leave the queues on the next run, and the digest
+names the ones that still carry L30D spend. Status changes since the previous run are
+listed in the run log and the digest.
+
+**Where it comes from.** Four undated `last_90d` pulls (`connector:status`), one row per
+campaign. Windsor resolves status at query time, not per cached day: on 2026-11-09 the
+Microsoft rows for 2026-08-01, cached two months before the 2026-10-06 pause, read
+"Paused". So a campaign's latest status comes back however long ago it last delivered,
+as long as that was inside the window. Fields: Google and Microsoft `campaign_status`;
+Meta `campaign_effective_status` plus `campaign_stop_time`, because a lifetime-budget
+campaign past its stop time still reads `ACTIVE`; Reddit `campaign_effective_status`.
+
+**What it cannot see.** A campaign that has not delivered in 90 days is absent from the
+pull, so it reads `No delivery (90d)`: paused or not, it is not spending. Microsoft's
+last delivery was 2026-10-06, so its rows flip from Paused to `No delivery (90d)` around
+2027-01-04. Nothing else changes when that happens: they still sit outside the queues.
+
+**Where it lives.** Found by its header in the header row (`Platform Status`; `Status` and
+`Campaign Status` also match), so the column can be moved in the Sheet. If no such header
+exists the routine adds one in the first column past the last header (Z) and copies the
+header style from the cell to its left. It refuses if that column already holds anything.
+Nothing in the Sheet's formulas reads it yet; whether Keep / Cut / Scale should is a
+modelling decision.
+
+A failed status pull leaves that platform's cells as they were and says so in the digest.
+It never stops the run.
+
 ## Known gaps
 
 - **Daily budget (column F) follows the platform from 2026-11-04.** Before that, Google
   and Microsoft budgets were entered by hand and drifted (2026-10-30: the video row said
   $700/day against $450 in Google Ads), and Meta/Reddit were estimated as L30D ÷ 30. It
   is the *configured* budget: a paused campaign that delivered in the last three days
-  still shows its budget, and a campaign that has not delivered in three days drops out
+  still shows its budget (Platform Status shows it as paused), and a campaign that has not delivered in three days drops out
   of the pull (Meta/Reddit then fall back to L30D ÷ 30; Google/Microsoft keep the old
   cell). Lifetime-budget Meta campaigns have no daily figure and always use the fallback.
 - **The video campaign is judged on purchase iROAS.** It is a Views campaign, so it reads
