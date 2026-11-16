@@ -27,6 +27,7 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
 | `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
+| `Pacing Curve` | **Projected, 7-day run rate ($)** (column found by header; created at **F** on first run) — projected cumulative spend from yesterday to month end. See [Month-end spend projection](#month-end-spend-projection) |
 | `iROAS Daily` | whole tab, rewritten each run |
 
 Nothing else is touched.
@@ -48,6 +49,7 @@ Nothing else is touched.
 | `PACING_DRY_RUN` | `1` to skip all writes and the Slack post |
 | `PACING_ALLOW_MONTH_MISMATCH` | `1` to bypass the month-rollover guard. See below |
 | `PACING_COVERAGE_MIN` | Share of MTD spend that must land on a tracker row before the digest warns. Default `0.98` |
+| `PACING_RUN_RATE_DAYS` | Complete days averaged for the month-end spend projection. Default `7`, range 1–29 |
 
 With neither `SLACK_OUT` nor `SLACK_BOT_TOKEN` set, the digest prints to stdout and is
 **not** posted — a misconfigured run stays silent rather than posting somewhere
@@ -128,6 +130,84 @@ Windsor daily spend rather than copied: the live tab was understated by \$7,122 
 spend — on every day from the 2nd onward, because of the trailing-30d window bug. Real
 August total was **\$154,495 against the \$140,000 guardrail (10.4% over)**, not the
 \$140,837 the sheet displayed.
+
+## Month-end spend projection
+
+The digest's projected month-end spend, its guardrail comparison and the $0-revenue
+headroom all use the trailing run rate (from 2026-11-16):
+
+```
+EOM = spend through yesterday + (average daily spend, last 7 complete days) x days left incl. today
+```
+
+It replaced a straight line, `MTD / days elapsed x days in month`, which had two problems:
+
+- It averaged the whole month, so a budget change kept projecting at the old pace for
+  the rest of the month. On 2026-11-16 spend had stepped down from ~$14k to ~$8.6k a day
+  on Nov 10; the straight line said $367,708 and the 7-day rate $323,234.
+- It counted today's partial day as a full day. Days elapsed includes today
+  (`Expected MTD` = daily budget x 16 on Nov 16), but at the 13:00 UTC run only ~20% of
+  the day has booked. So it read low every morning: about 40% low on the 2nd, still ~5%
+  low mid-month. Day 1 was meaningless.
+
+The run rate excludes today from both the anchor and the rate, and its window runs back
+across the month boundary, so day 1 projects at last month's closing rate.
+
+The digest shows the rate next to the month-to-date average and the straight line it
+replaced (on complete days, so the partial-day error is gone from that too):
+
+```
+Projected EOM spend (7-day run rate): $323,234  (over the $X guardrail by N%)
+   $9,292/day over Nov 9–Nov 15 vs $12,257/day month to date; straight line $367,708
+```
+
+A wide gap between the two means spend has changed pace. Whether the change lasts is the
+judgment call the projection cannot make.
+
+**Pacing Curve** gets the projected path in its own column, found by any header
+containing "run rate" (created at F, formatted like column E, on the first run). It
+holds actual cumulative spend through yesterday as the anchor, so the line joins the
+actual curve, then the projection to month end; earlier days are blank. Same date-level
+series as Actual Cumulative, so the two meet exactly. **The chart does not plot it until
+the column is added as a series.**
+
+### What the backtest says
+
+Replayed against daily spend for May–Oct 2026 (Windsor, all four platforms): a morning run
+on every day of each month, scored against that month's actual total. Mean absolute error:
+
+| Run on day | Straight line, as built | Straight line, complete days | Rolling 7-day | Rolling 14-day |
+|---|---:|---:|---:|---:|
+| 1–7 (n=35) | 38.8% | 25.6% | 20.1% | 20.5% |
+| 8–14 (n=35) | 10.6% | 12.6% | 18.9% | 11.5% |
+| 15–21 (n=42) | 11.5% | 11.5% | 16.2% | 13.2% |
+| 22–EOM (n=58) | 6.5% | 5.3% | 4.7% | 5.8% |
+| All | 15.2% | 12.1% | 13.6% | 11.9% |
+
+May days 1–14 are left out of every column (no April data for the lookback). "As built"
+assumes 20% of today booked at run time.
+
+How to read it:
+
+- **The 7-day rate is not better everywhere.** It wins the first week and the last ten
+  days, and loses mid-month by 4–6 points. It reacts fast, which helps when a change
+  sticks (a budget cut) and hurts when it does not (a promo burst that ends): Jul 7–9,
+  Sep 6–16 and Oct 27–Nov 9 were all bursts, and a 7-day window projects each one
+  forward for weeks after it ends.
+- The partial-day fix accounts for much of the gain over the old number: the straight
+  line on complete days alone goes from 15.2% to 12.1%.
+- 14 days scored best overall, but 11.9% against 12.1% on six months is within noise.
+  `PACING_RUN_RATE_DAYS=14` switches it if the team prefers a slower line.
+- No trailing method predicts a planned surge. All four ran 13–17% low on average across
+  October's runs from day 8, because none of them could see the Oct 27–31 burst coming.
+  Expect the same for BFCM: in late November, read the projection as a floor.
+- The actual landed between the straight line and the 7-day rate on only 16% of runs
+  from day 8 on. The two usually miss in the same direction, so they do not bracket the
+  outcome.
+
+Not changed, still straight line with the partial-day bias: the Sheet's own Pacing Curve
+**Projected ($)** column (E) and Pacing Tracker **Projected EOM** (Q) per campaign. Both
+are Sheet formulas.
 
 ## Digest queue ordering
 
@@ -424,5 +504,7 @@ It never stops the run.
   ~1% higher, because they include spend not attributable to a currently-reported
   campaign row. Each run prints both and the drift; it only flags above 3%, which would
   mean something structural (a platform dropped out, a filter stopped matching) rather
-  than this known gap. Measured 2026-08-12: $61,181 vs $60,551.
+  than this known gap. Measured 2026-08-12: $61,181 vs $60,551. The month-end
+  projection is on the date-level basis, so it runs ~1% above `Total MTD spend` plus the
+  run rate on the campaign basis.
 - **`total_mtd`** sums every campaign Windsor returns, including any with no sheet row.

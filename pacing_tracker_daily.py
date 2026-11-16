@@ -22,12 +22,13 @@ What this routine does each morning:
      Status column every run - see pull_campaign_status().
   4. Write the spend-weighted multiplier into Config so lag adjustment stays current.
   5. Rewrite the whole month-to-date cumulative spend series in Pacing Curve, so the
-     column self-heals after a missed run or a platform restatement.
+     column self-heals after a missed run or a platform restatement, and the projected
+     path to month end at the trailing 7-day run rate beside it - see run_rate_projection().
   6. (Optional) If a fresh Google "Time Lag" CSV export is dropped in TIMELAG_DIR,
      re-derive the maturation curve and overwrite the curve cells in Config.
-  7. Post a Slack digest: blended iROAS vs floor, $0-revenue budget headroom, guardrail
-     status, and the three review queues (Cut or Fix / Raise / Reduce). All suggestions
-     are review-gated.
+  7. Post a Slack digest: projected EOM spend at the run rate, blended iROAS vs floor,
+     $0-revenue budget headroom, guardrail status, and the three review queues
+     (Cut or Fix / Raise / Reduce). All suggestions are review-gated.
      Cut or Fix and Reduce rank by dollars; Raise ranks by iROAS - see queue_block().
 
 Confidence notes (read before trusting output):
@@ -128,6 +129,16 @@ COVERAGE_MIN = float(os.environ.get("PACING_COVERAGE_MIN", "0.98"))
 
 TAB_TRACKER="Pacing Tracker"; TAB_CURVE="Pacing Curve"; TAB_CONFIG="Config"
 DATA_START_ROW=3
+
+# Month-end spend projection - see run_rate_projection(). The window is the number of
+# complete days averaged; daily_window() reaches at least 29 days back, which bounds it.
+RUN_RATE_DAYS = int(os.environ.get("PACING_RUN_RATE_DAYS", "7"))
+if not 1 <= RUN_RATE_DAYS <= 29:
+    raise ValueError(f"PACING_RUN_RATE_DAYS must be 1..29, got {RUN_RATE_DAYS}")
+# Pacing Curve column for the projected path, found by any header containing "run rate"
+# so the label can follow the window length. Header row is 2, day N is row N+2.
+CURVE_HEADER_ROW = 2
+CURVE_RR_HEADER  = f"Projected, {RUN_RATE_DAYS}-day run rate ($)"
 
 # Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily budget), G(l30sp), H(l30cv),
 # plus Platform Status, which is found by its header (find_status_column) rather than fixed here.
@@ -698,6 +709,101 @@ def mtd_series_cells(daily_all):
             cells.append(gspread.Cell(n+2,4,""))
     return cells, cum, missing
 
+def run_rate_projection(daily_all, today=None, days=None):
+    """
+    Month-end spend at the trailing run rate:
+
+        EOM = spend through yesterday
+              + average daily spend over the last `days` COMPLETE days
+                x days left in the month, today included
+
+    Replaces the straight line (MTD / days elapsed x days in month), which has two
+    problems. It averages the whole month, so a budget cut on the 10th still projects at
+    the pre-cut pace for the rest of the month (2026-11-16: $368k straight line against
+    $323k at the 7-day rate, after spend stepped down from ~$14k to ~$8.6k a day on Nov
+    10). And it counted today's partial day as a full one (days elapsed includes today),
+    so it read low every morning: with ~20% of a day booked at the 13:00 UTC run, ~40%
+    low on the 2nd and still ~5% low mid-month.
+
+    Today is excluded from both the anchor and the rate, the same reason the digest's
+    L7 iROAS ends yesterday: it is a partial day and reads low for reasons about the clock.
+    The window runs back across the month boundary, so day 1 projects at last month's
+    closing rate rather than at nothing.
+
+    Not a forecast of promotions. A run rate extrapolates the recent past, so it projects a
+    burst forward after the burst ends and misses a planned surge (BFCM) entirely. Backtest
+    numbers are in the README.
+
+    Built on the date-level daily series - the same one as Pacing Curve "Actual
+    Cumulative" - so the projected path meets the actual line. That series runs ~1% above
+    the campaign-level Total MTD figure; see Known gaps.
+
+    Returns dict:
+      eom, rate, thru_yesterday, days_left, days_in_month
+      straight_line   complete-days straight line for comparison; None on day 1
+      window          (first, last) date of the rate window
+      missing         dates in the window absent from the series, counted as $0
+      path            {day of month: cumulative $ or ""} for the Pacing Curve column:
+                      blank before yesterday, actual through yesterday as the anchor so
+                      the line joins the actual curve, then the projection to month end
+    """
+    today = today or TODAY
+    days = days or RUN_RATE_DAYS
+    n_days = calendar.monthrange(today.year, today.month)[1]
+    month_start = today.replace(day=1)
+    thru = sum(daily_all.get((month_start + dt.timedelta(days=i)).isoformat(), 0.0)
+               for i in range(today.day - 1))
+    window = [(today - dt.timedelta(days=k)).isoformat() for k in range(days, 0, -1)]
+    missing = [d for d in window if d not in daily_all]
+    rate = sum(daily_all.get(d, 0.0) for d in window) / days
+    left = n_days - today.day + 1
+    path = {}
+    for n in range(1, n_days + 1):
+        if n < today.day - 1:   path[n] = ""
+        elif n == today.day - 1: path[n] = round(thru, 2)
+        else:                    path[n] = round(thru + rate * (n - today.day + 1), 2)
+    return {
+        "eom": thru + rate * left, "rate": rate, "thru_yesterday": thru,
+        "days_left": left, "days_in_month": n_days,
+        "straight_line": (thru / (today.day - 1) * n_days) if today.day > 1 else None,
+        "window": (dt.date.fromisoformat(window[0]), dt.date.fromisoformat(window[-1])),
+        "missing": missing, "path": path,
+    }
+
+def find_run_rate_column(ws):
+    """
+    (column, exists) for the projected path on Pacing Curve: any header in the header row
+    containing "run rate", else the first column past the last header. Found by header
+    so the column can move, and so changing RUN_RATE_DAYS relabels it rather than
+    adding a second one.
+    """
+    hdr = ws.row_values(CURVE_HEADER_ROW)
+    for i, v in enumerate(hdr, 1):
+        if "run rate" in str(v).lower():
+            return i, True
+    return len(hdr) + 1, False
+
+def create_run_rate_column(sh, ws, col, last_row):
+    """
+    Claim `col` for the projected path, formatted like the column to its left (the
+    sheet's own Projected column: header style and currency format).
+
+    Refuses if anything is already in the column: a header row that ends early does not
+    prove the column is empty below it.
+    """
+    if col > ws.col_count:
+        ws.add_cols(col - ws.col_count)
+    elif any(str(v).strip() for v in ws.col_values(col)):
+        raise RuntimeError(f"Pacing Curve column {gspread.utils.rowcol_to_a1(1, col)[:-1]} is "
+                           f"past the last header but not empty; add a '{CURVE_RR_HEADER}' "
+                           f"header where the projection should go")
+    sh.batch_update({"requests": [{"copyPaste": {
+        "source":      {"sheetId": ws.id, "startRowIndex": CURVE_HEADER_ROW - 1, "endRowIndex": last_row,
+                        "startColumnIndex": col - 2, "endColumnIndex": col - 1},
+        "destination": {"sheetId": ws.id, "startRowIndex": CURVE_HEADER_ROW - 1, "endRowIndex": last_row,
+                        "startColumnIndex": col - 1, "endColumnIndex": col},
+        "pasteType": "PASTE_FORMAT"}}]})
+
 def stamp_lastrun(cfg):
     r=_find_label_row(cfg,"Last routine run")
     if r: cfg.update_cell(r,3,dt.datetime.now().strftime("%Y-%m-%d %H:%M %Z"))
@@ -1170,6 +1276,37 @@ def main():
           f"{len(series_cells)-TODAY.day} blanked"
           + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
 
+    # ---- month-end spend at the trailing run rate (digest headline + Pacing Curve path)
+    proj = run_rate_projection(daily_all)
+    w0, w1 = proj["window"]
+    print(f"[projection] EOM ${proj['eom']:,.0f} = ${proj['thru_yesterday']:,.0f} through "
+          f"{TODAY - dt.timedelta(days=1):%b %-d} + ${proj['rate']:,.0f}/day ({w0:%b %-d}-{w1:%b %-d}) "
+          f"x {proj['days_left']} days left incl. today"
+          + (f"; straight line ${proj['straight_line']:,.0f}" if proj["straight_line"] else ""))
+    for d in proj["missing"]:
+        print(f"  [!] no daily spend for {d} - counted as $0 in the run rate")
+    rr_write_error = None
+    rr_col, rr_exists = find_run_rate_column(curve_ws)
+    rr_a1 = gspread.utils.rowcol_to_a1(1, rr_col)[:-1]
+    if not DRY_RUN:
+        try:
+            last = proj["days_in_month"] + 2
+            if not rr_exists:
+                create_run_rate_column(sh, curve_ws, rr_col, last)
+            curve_ws.update_cells(
+                [gspread.Cell(CURVE_HEADER_ROW, rr_col, CURVE_RR_HEADER)]
+                + [gspread.Cell(n + 2, rr_col, v) for n, v in proj["path"].items()],
+                value_input_option="USER_ENTERED")
+        except Exception as e:
+            rr_write_error = str(e)
+            print(f"  [!] run-rate projection not written to Pacing Curve: {e}")
+    if not rr_write_error:
+        print(f"[write] Pacing Curve {rr_a1}3:{rr_a1}{proj['days_in_month']+2} - run-rate path, "
+              f"day {max(TODAY.day-1, 1)} to {proj['days_in_month']}"
+              + ("" if rr_exists else f" (no run-rate header yet - "
+                 + ("would be created" if DRY_RUN else "created") + ")")
+              + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
+
     # ---- iROAS by day: daily / MTD / rolling-30, for spotting whether a change landed
     detail = pull_daily_detail()
     blend_factor = blended_incrementality_factor(tracker, LAST_ROW)
@@ -1204,9 +1341,9 @@ def main():
         try: return float(str(x).replace("$","").replace(",","").replace("%","").replace("x","").strip())
         except (ValueError, AttributeError): return 0.0
 
-    def blends_and_projection():
+    def blends():
         """
-        Return (uncorrected_blend, projected_blend, projected_mtd, budget_guardrail).
+        Return (uncorrected_blend, projected_blend, budget_guardrail, floor).
 
         Two blends, both spend-weighted over L30D:
           uncorrected = SUM(conv_value * incr_factor) / SUM(spend)   - booked to date
@@ -1214,8 +1351,7 @@ def main():
         The gross-up is exactly the sheet's Config!C65, so `projected` matches the
         sheet's own Blended Incremental ROAS cell rather than approximating it.
 
-        Projected MTD spend extrapolates actual spend over the month on days elapsed,
-        the same basis as the per-campaign Projected EOM column.
+        Month-end spend comes from run_rate_projection(), not from here.
         """
         rows = tracker.get_values(f"D{DATA_START_ROW}:H{LAST_ROW}")
         num = den = 0.0
@@ -1226,33 +1362,37 @@ def main():
             num += cv*factor; den += spend
         unc = (num/den) if den else 0.0
 
-        days_in_month = _n(cfg.cell(12,3).value) or 0
-        days_elapsed  = _n(cfg.cell(14,3).value) or 0
         guardrail     = _n(cfg.cell(10,3).value)
         # Floor comes from Config!C6, the same cell the sheet's own formulas reference.
         # Do NOT source it from hl('Target iROAS Floor'): that is a substring search over
         # column A, and it returns None the moment the label is reworded - which silently
         # zeroes anything derived from it instead of failing loudly.
         floor         = _n(cfg.cell(6,3).value)
-        proj_mtd = (total_mtd/days_elapsed*days_in_month) if days_elapsed else 0.0
-        return unc, unc*mult, proj_mtd, guardrail, floor
+        return unc, unc*mult, guardrail, floor
 
-    uncorrected, projected_blend, projected_mtd, budget_guardrail, floor_iroas = blends_and_projection()
+    uncorrected, projected_blend, budget_guardrail, floor_iroas = blends()
     if not floor_iroas:
         raise RuntimeError("Config!C6 (target iROAS floor) is empty or unparseable; "
                            "refusing to build a digest whose headroom would read $0.")
 
     # Zero-revenue budget headroom: how much MORE could land on top of projected month-end
     # spend, generating $0 additional revenue, before the projected blend falls to the
-    # floor. Solve projected_revenue/(projected_mtd + X) = floor, where
-    # projected_revenue = projected_blend * projected_mtd:
-    #     X = projected_mtd * (projected_blend/floor - 1)
+    # floor. Solve projected_revenue/(projected_eom + X) = floor, where
+    # projected_revenue = projected_blend * projected_eom:
+    #     X = projected_eom * (projected_blend/floor - 1)
     # Negative means the projection is already under the floor: no headroom to give.
-    headroom = projected_mtd * (projected_blend/floor_iroas - 1)
+    projected_eom = proj["eom"]
+    headroom = projected_eom * (projected_blend/floor_iroas - 1)
     over = ""
-    if budget_guardrail and projected_mtd:
-        delta = projected_mtd/budget_guardrail - 1
+    if budget_guardrail and projected_eom:
+        delta = projected_eom/budget_guardrail - 1
         over = f"  ({'over' if delta>0 else 'under'} the ${budget_guardrail:,.0f} guardrail by {abs(delta)*100:.0f}%)"
+    # The rate against month-to-date pace and the straight line it replaces, so a step
+    # change in spend is visible as one rather than as a surprising headline.
+    pace_line = (f"   ${proj['rate']:,.0f}/day over {w0:%b %-d}–{w1:%b %-d}"
+                 + (f" vs ${proj['thru_yesterday']/(TODAY.day-1):,.0f}/day month to date; "
+                    f"straight line ${proj['straight_line']:,.0f}" if proj["straight_line"]
+                    else f" (last month's closing rate; day 1)"))
 
     def coverage_lines():
         """Data-quality lines for the digest; empty when coverage is clean."""
@@ -1275,6 +1415,11 @@ def main():
                        f"those rows' {STATUS_HEADER} was not refreshed.")
         if status_write_error:
             out.append(f":warning: {STATUS_HEADER} column could not be written this run.")
+        if proj["missing"]:
+            out.append(f":warning: No daily spend for {', '.join(proj['missing'])}; counted as $0, "
+                       f"so the run rate and projected EOM read low.")
+        if rr_write_error:
+            out.append(":warning: Run-rate projection could not be written to Pacing Curve this run.")
         if status_changes:
             shown = "; ".join(f"{n[:40].rstrip()} {old} \u2192 {new}" for n, old, new in status_changes[:4])
             more = f" +{len(status_changes)-4} more" if len(status_changes) > 4 else ""
@@ -1374,7 +1519,8 @@ def main():
         *([":test_tube: *DRY RUN — nothing was written to the Sheet, do not post this.*"] if DRY_RUN else []),
         f":bar_chart: *AutoTune Pacing refreshed* ({TODAY:%b %d})",
         f"Total MTD spend: ${total_mtd:,.0f}",
-        f"Projected MTD spend: ${projected_mtd:,.0f}{over}",
+        f"Projected EOM spend ({RUN_RATE_DAYS}-day run rate): ${projected_eom:,.0f}{over}",
+        pace_line,
         f"Blended incremental ROAS (L30D, uncorrected): {uncorrected:.2f}x",
         f"Projected Blended incremental ROAS (L30D): {projected_blend:.2f}x  (floor {floor_iroas:.2f}x)",
         f"Projected iROAS, month to date: " + _x(iroas_mtd),

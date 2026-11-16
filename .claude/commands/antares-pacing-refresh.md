@@ -147,6 +147,9 @@ The script writes only these cells:
 - `Config` C77 — last-run stamp
 - `Pacing Curve` D3:D(last day of month) — cumulative spend through today, and the
   remaining days blanked so a previous month's tail cannot linger
+- `Pacing Curve` **Projected, 7-day run rate ($)**, found by any header containing
+  "run rate" (created at F on the first run with this code): cumulative spend through
+  yesterday, then the projection to month end at the 7-day run rate
 - `iROAS Daily` — rewritten each run: per-day spend, projected conversion value, and
   iROAS daily / MTD / rolling-30
 
@@ -174,6 +177,11 @@ The script prints a reconciliation block. **Read it before posting.**
   run` lines name every row that flipped; those also go in the digest. Rows Paused, Removed
   or Ended are left out of the digest's queues, and any that still carry L30D spend are
   named in one line under the queues, so nothing drops out silently.
+- `[projection] EOM $X = $A through <yesterday> + $R/day (<window>) x N days left`: the
+  month-end spend in the digest, with its math. `no daily spend for <date> - counted as $0
+  in the run rate` means a day is missing from every platform's `:daily` pull, so the
+  projection reads low; the digest warns too. A large gap to the straight line on the
+  same line is a pace change, not an error.
 - `[timelag] ... skipped` — a Time Lag export was found but its window isn't matured
   (< 28 days). This is correct behavior; the existing curve is kept. Mention it in your
   summary but do not override it.
@@ -192,6 +200,7 @@ computed and the review gating is deliberate.
 
 ## Step 6 — report back
 
-Give the user: blended iROAS vs floor, guardrail status, total MTD spend, the lag
-gross-up used, queue counts (Cut or Fix / Raise / Reduce), and anything from step 4
-that needs attention.
+Give the user: blended iROAS vs floor, guardrail status, total MTD spend, projected
+month-end spend at the 7-day run rate (and the straight line beside it if they differ by
+more than ~5%), the lag gross-up used, queue counts (Cut or Fix / Raise / Reduce), and
+anything from step 4 that needs attention.
