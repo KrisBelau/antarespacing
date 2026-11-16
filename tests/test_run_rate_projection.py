@@ -61,4 +61,29 @@ print("missing day    : reported, counted $0")
 p14 = P.run_rate_projection(daily, today=today, days=14)
 assert p14["window"] == (dt.date(2026, 11, 2), dt.date(2026, 11, 15))
 assert abs(p14["rate"] - (8 * 1000 + 6 * 500) / 14) < 1e-9
+
+# ---- per-campaign inputs for Pacing Tracker Projected EOM (col Q)
+# Campaign 1: $300/day for the 7 complete days, $40 so far today. Campaign 2: only spent
+# today. A row outside the window (8 days ago) must not count. No id: skipped.
+rows = [{"date": (today - dt.timedelta(days=k)).isoformat(), "campaign_id": "1", "spend": 300.0}
+        for k in range(1, 8)]
+rows += [{"date": today.isoformat(), "campaign_id": "1", "spend": 40.0},
+         {"date": today.isoformat(), "campaign_id": "2", "spend": 15.0},
+         {"date": (today - dt.timedelta(days=8)).isoformat(), "campaign_id": "1", "spend": 9999.0},
+         {"date": today.isoformat(), "campaign_id": None, "spend": 5.0}]
+rb = P.recent_by_campaign(rows, today=today, days=7)
+assert rb == {"1": (40.0, 300.0), "2": (15.0, 0.0)}, rb
+print("recent         : today split out, window bounded")
+
+recent = {f"google_ads:{k}": v for k, v in rb.items()}
+inp = P.run_rate_inputs([("Row 1", "google_ads:1", 4540.0),     # 15 days x $300 + $40 today
+                         ("Row 2", "google_ads:2", 15.0),
+                         ("Row 3", "google_ads:3", 10.0),       # in MTD, not in recent: no spend lately
+                         ("Row 4", None, 0.0),                  # zeroed row, no campaign ID
+                         ("Row 5", "facebook:9", 800.0),        # platform whose recent pull failed
+                         ("Row 6", "google_ads:2", 10.0)],      # MTD below today's spend: floored at 0
+                        recent, ["facebook"])
+assert inp == {"Row 1": (4500.0, 300.0), "Row 2": (0.0, 0.0), "Row 3": (10.0, 0.0),
+               "Row 4": (0.0, 0.0), "Row 6": (0.0, 0.0)}, inp
+print("inputs         : thru yesterday = MTD - today; failed platform left out")
 print("PASS")

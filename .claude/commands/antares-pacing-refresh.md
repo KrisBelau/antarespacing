@@ -38,6 +38,7 @@ prev = (t.replace(day=1) - d.timedelta(days=1)).replace(day=1)
 print(f'MONTH_START={t.replace(day=1)}')
 print(f'TODAY={t}')
 print(f'BUDGET_START={t - d.timedelta(days=2)}')
+print(f'RECENT_START={t - d.timedelta(days=7)}')
 print(f'DAILY_START={min(prev - d.timedelta(days=29), t - d.timedelta(days=29))}')"
 ```
 
@@ -47,9 +48,9 @@ on the 1st of last month instead of ramping up from nothing. The routine's
 `daily_window()` computes exactly this union; feeding it a shorter window silently
 truncates last month. Every consumer narrows the window itself.
 
-## Step 2 — pull the twenty Windsor datasets
+## Step 2 — pull the twenty-four Windsor datasets
 
-Call `mcp__Windsor_ai__get_data` twenty times. Field names below are verified against
+Call `mcp__Windsor_ai__get_data` twenty-four times. Field names below are verified against
 `get_fields`; **do not substitute them** — in particular Meta uses
 `action_values_omni_purchase`, *not* `conversions_value`.
 
@@ -79,6 +80,10 @@ across its old and new names, and the routine refuses rows that have no ID.
 | `bing:status` | `bing` | `campaign_id, campaign_status` | `date_preset="last_90d"`, `filters=[["account_name","eq","Antares Adwords"]]` |
 | `facebook:status` | `facebook` | `campaign_id, campaign_effective_status, campaign_stop_time` | `date_preset="last_90d"`, `filters=[["account_name","eq","Antares Ads"]]` |
 | `reddit:status` | `reddit` | `campaign_id, campaign_effective_status` | `date_preset="last_90d"`, `accounts=["a2_esoyaxwp5glg"]` |
+| `google_ads:recent` | `google_ads` | `date, campaign_id, spend` | `date_from=RECENT_START`, `date_to=TODAY`, `accounts=["802-485-7603"]` |
+| `bing:recent` | `bing` | `date, campaign_id, spend` | `date_from=RECENT_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Adwords"]]` |
+| `facebook:recent` | `facebook` | `date, campaign_id, spend` | `date_from=RECENT_START`, `date_to=TODAY`, `filters=[["account_name","eq","Antares Ads"]]` |
+| `reddit:recent` | `reddit` | `date, campaign_id, spend` | `date_from=RECENT_START`, `date_to=TODAY`, `accounts=["a2_esoyaxwp5glg"]` |
 
 The four `:daily` pulls feed the month-to-date cumulative series on Pacing Curve and the
 iROAS Daily tab, which is why they carry each platform's conversion-value field too.
@@ -99,7 +104,12 @@ paused weeks ago still comes back as Paused rather than dropping out. The Meta c
 time out on its first attempt; repeat the identical call. A missing or failed `:status` key
 does not stop the run — that platform's status cells are left as they are.
 
-Write all twenty result arrays into one JSON file keyed exactly as above:
+The four `:recent` pulls feed the per-campaign Projected EOM (Pacing Tracker Q): each
+campaign's spend today, split out, and its average over the 7 complete days before. ~300
+rows for Google. A missing or failed `:recent` key does not stop the run: that
+platform's run-rate cells are left as they are and the digest says so.
+
+Write all twenty-four result arrays into one JSON file keyed exactly as above:
 
 ```json
 { "google_ads:mtd": [ {...}, ... ], "google_ads:l30": [ ... ], ... }
@@ -110,7 +120,7 @@ Save it to `/tmp/windsor_cache.json`.
 **Sanity-check before continuing.** If any of these fail, stop and report rather than
 writing partial data to a live client sheet:
 
-- all twenty keys present. Every key must be non-empty **except the `bing:*` keys**:
+- all twenty-four keys present. Every key must be non-empty **except the `bing:*` keys**:
   Microsoft Ads has been paused since 2026-10-06, so `bing:mtd` is empty from Nov 1 and
   `bing:l30` from about Nov 5. Empty Bing is expected; any other empty key, stop.
 - each `:daily` key has ~30 rows, one per date
@@ -143,10 +153,12 @@ The script writes only these cells:
   `No delivery (90d)` when the campaign is in none of the `:status` pulls, `No campaign ID`
   for an unmapped row. Found by its header in row 2; on the first run with this code the
   header does not exist yet and is added in the first free column past the last header (Z)
+- `Pacing Tracker` **MTD thru Yesterday ($)** / **Run Rate, 7d ($/day)** (AA/AB, found by
+  header): per-campaign inputs to Projected EOM (Q), which the Sheet computes
 - `Config` C65 — spend-weighted lag gross-up
 - `Config` C77 — last-run stamp
-- `Pacing Curve` D3:D(last day of month) — cumulative spend through today, and the
-  remaining days blanked so a previous month's tail cannot linger
+- `Pacing Curve` D3:D33: cumulative spend through today, and every later row blanked,
+  past the month's end too, so a previous month's tail cannot linger
 - `Pacing Curve` **Projected, 7-day run rate ($)**, found by any header containing
   "run rate" (created at F on the first run with this code): cumulative spend through
   yesterday, then the projection to month end at the 7-day run rate
@@ -182,6 +194,9 @@ The script prints a reconciliation block. **Read it before posting.**
   in the run rate` means a day is missing from every platform's `:daily` pull, so the
   projection reads low; the digest warns too. A large gap to the straight line on the
   same line is a pace change, not an error.
+- `[runrate] N rows ... per-campaign projections sum to $X`: should sit just under the
+  `[projection]` EOM; the difference is campaigns with no tracker row (listed under
+  `in Windsor, no tracker row`). A large gap means rows are not resolving.
 - `[timelag] ... skipped` — a Time Lag export was found but its window isn't matured
   (< 28 days). This is correct behavior; the existing curve is kept. Mention it in your
   summary but do not override it.

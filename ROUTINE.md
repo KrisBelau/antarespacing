@@ -45,7 +45,7 @@ created. Edit it at https://claude.ai/code/routines/trig_011uEEi3kLiMMuSG8Viti7N
 **The live prompt is not the block below.** Checked 2026-11-09, the task still carries
 the version last edited 2026-10-22: it names "the nine Windsor.ai pulls", stops if any of
 them returns empty, and stops if "fewer than ~40 of the 45 campaign rows match by name".
-None of that matches the code any more (twenty pulls, empty Microsoft pulls expected,
+None of that matches the code any more (twenty-four pulls, empty Microsoft pulls expected,
 rows matched by campaign ID, a coverage check instead of a row count). Runs still succeed
 because the prompt hands off to the command file, but the stop rules it states are not
 the ones the command file checks. Paste the block below in to bring them back in line.
@@ -54,7 +54,7 @@ the ones the command file checks. Paste the block below in to bring them back in
 Daily Antares / AutoTune paid-media pacing refresh.
 
 The authoritative procedure is `.claude/commands/antares-pacing-refresh.md` in this repo
-(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the twenty
+(KrisBelau/antarespacing). Invoke it as /antares-pacing-refresh. It covers the twenty-four
 Windsor.ai pulls, the run command, and the Slack post.
 
 PREREQUISITE the command file does not cover: the Google service-account key is

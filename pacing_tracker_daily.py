@@ -142,7 +142,12 @@ if not 1 <= RUN_RATE_DAYS <= 29:
 # Pacing Curve column for the projected path, found by any header containing "run rate"
 # so the label can follow the window length. Header row is 2, day N is row N+2.
 CURVE_HEADER_ROW = 2
+CURVE_DAYS = 31        # Pacing Curve rows 3..33 cover day 1..31 whatever the month's length
 CURVE_RR_HEADER  = f"Projected, {RUN_RATE_DAYS}-day run rate ($)"
+# Per-campaign inputs for Pacing Tracker Projected EOM (col Q) - see recent_by_campaign().
+# Found by header ("thru yesterday" / "run rate"); created past the last header if absent.
+TRACKER_THRU_Y_HEADER = "MTD thru Yesterday ($)"
+TRACKER_RATE_HEADER   = f"Run Rate, {RUN_RATE_DAYS}d ($/day)"
 
 # Column map on Pacing Tracker (1-indexed). Routine writes only E(mtd), F(daily budget), G(l30sp), H(l30cv),
 # plus Platform Status, which is found by its header (find_status_column) rather than fixed here.
@@ -174,13 +179,13 @@ def daily_window():
 # ================================================================ WINDSOR
 def windsor_cache_key(connector, fields, date_preset=None, window=None):
     """
-    Stable name for one Windsor pull. The twenty calls this routine makes are fully
+    Stable name for one Windsor pull. The twenty-four calls this routine makes are fully
     distinguished by connector + window, so the slash command can populate the cache
     without reconstructing argument tuples:
-        google_ads:mtd  google_ads:l30  google_ads:daily  google_ads:budget  google_ads:status
-        bing:mtd        bing:l30        bing:daily        bing:budget        bing:status
-        facebook:mtd    facebook:l30    facebook:daily    facebook:budget    facebook:status
-        reddit:mtd      reddit:l30      reddit:daily      reddit:budget      reddit:status
+        google_ads:mtd  google_ads:l30  google_ads:daily  google_ads:budget  google_ads:status  google_ads:recent
+        bing:mtd        bing:l30        bing:daily        bing:budget        bing:status        bing:recent
+        facebook:mtd    facebook:l30    facebook:daily    facebook:budget    facebook:status    facebook:recent
+        reddit:mtd      reddit:l30      reddit:daily      reddit:budget      reddit:status      reddit:recent
     """
     if window:                 pass
     elif date_preset:          window = "l30"
@@ -338,6 +343,69 @@ def pull_daily_budgets():
         for cid, v in daily_budgets_from_rows(connector, rows).items():
             out[f"{connector}:{cid}"] = v
     return out, failed
+
+def recent_by_campaign(rows, today=None, days=None):
+    """
+    {campaign_id: (today's spend, average daily spend over the last `days` complete days)}
+    from one platform's campaign x date pull covering today-days..today.
+
+    Feeds the per-campaign Projected EOM in Pacing Tracker col Q, on the same basis as the
+    account projection in run_rate_projection(): today out of the rate, and out of the
+    anchor (MTD thru yesterday = MTD - today's spend). A campaign absent from the pull
+    spent nothing in the window, so it reads (0, 0) by omission.
+    """
+    today = today or TODAY
+    days = days or RUN_RATE_DAYS
+    t = today.isoformat(); lo = (today - dt.timedelta(days=days)).isoformat()
+    acc = {}
+    for r in rows:
+        cid, d = r.get("campaign_id"), r.get("date") or ""
+        if not cid or not d:
+            continue
+        td, s = acc.get(str(cid), (0.0, 0.0))
+        sp = _f(r.get("spend"))
+        if d == t:          td += sp
+        elif lo <= d < t:   s += sp
+        acc[str(cid)] = (td, s)
+    return {cid: (td, s / days) for cid, (td, s) in acc.items()}
+
+def pull_recent_campaign_spend():
+    """
+    {"connector:campaign_id": (today's spend, run rate)} plus the connectors whose pull
+    failed. A failed pull is logged and skipped: those rows' run-rate cells keep their
+    previous values and Projected EOM keeps computing from them, which is a smaller
+    problem than a failed refresh.
+    """
+    start = (TODAY - dt.timedelta(days=RUN_RATE_DAYS)).isoformat(); end = TODAY.isoformat()
+    out, failed = {}, []
+    for _plat, connector, sel, _cv in PLATFORMS:
+        try:
+            rows = windsor_get(connector, ["date", "campaign_id", "spend"], date_from=start,
+                               date_to=end, window="recent", **sel)
+        except Exception as e:
+            print(f"  [!] recent-spend pull failed for {connector}, run-rate columns left as is: {e}")
+            failed.append(connector); continue
+        for cid, v in recent_by_campaign(rows).items():
+            out[f"{connector}:{cid}"] = v
+    return out, failed
+
+def run_rate_inputs(rows, recent, recent_failed):
+    """
+    {row name: (MTD thru yesterday, run rate)} for the tracker rows written this run.
+
+    `rows` is [(name, key or None, mtd_spend)], one per row whose MTD cell is being
+    written. Rows on a platform whose recent pull failed are left out, so their cells
+    keep the previous values. MTD thru yesterday is floored at 0: the MTD and recent
+    pulls are separate snapshots, and a few dollars of today's spend landing between
+    them must not produce a negative.
+    """
+    out = {}
+    for name, key, mtd in rows:
+        if key and key.split(":", 1)[0] in recent_failed:
+            continue
+        today_sp, rate = recent.get(key, (0.0, 0.0)) if key else (0.0, 0.0)
+        out[name] = (max(0.0, mtd - today_sp), rate)
+    return out
 
 def status_label(connector, row, now=None):
     """
@@ -696,9 +764,11 @@ def mtd_series_cells(daily_all):
     caller surfaces them rather than writing a silently wrong series.
     """
     month_start=TODAY.replace(day=1)
-    days_in_month=calendar.monthrange(TODAY.year, TODAY.month)[1]
     cum=0.0; cells=[]; missing=[]
-    for n in range(1, days_in_month+1):
+    # Through day 31 in every month, not just this month's length: a 30-day month never
+    # rewrote row 33, so November's chart carried October 31's cumulative ($213,396) as a
+    # stray point at day 31 (found 2026-11-16).
+    for n in range(1, CURVE_DAYS+1):
         if n <= TODAY.day:
             d=(month_start+dt.timedelta(days=n-1)).isoformat()
             if d not in daily_all: missing.append(d)
@@ -774,23 +844,23 @@ def run_rate_projection(daily_all, today=None, days=None):
         "missing": missing, "path": path,
     }
 
-def find_run_rate_column(ws):
+def find_header_column(ws, header_row, needle):
     """
-    (column, exists) for the projected path on Pacing Curve: any header in the header row
-    containing "run rate", else the first column past the last header. Found by header
-    so the column can move, and so changing RUN_RATE_DAYS relabels it rather than
-    adding a second one.
+    (column, exists): the first header in `header_row` containing `needle`, case
+    insensitive, else the first column past the last header. Found by header so the
+    column can be moved, and so a label that carries the window length ("7-day run
+    rate") is relabelled when RUN_RATE_DAYS changes rather than duplicated.
     """
-    hdr = ws.row_values(CURVE_HEADER_ROW)
+    hdr = ws.row_values(header_row)
     for i, v in enumerate(hdr, 1):
-        if "run rate" in str(v).lower():
+        if needle in str(v).lower():
             return i, True
     return len(hdr) + 1, False
 
-def create_run_rate_column(sh, ws, col, last_row):
+def claim_column(sh, ws, col, header_row, last_row, header, fmt_col):
     """
-    Claim `col` for the projected path, formatted like the column to its left (the
-    sheet's own Projected column: header style and currency format).
+    Set up an empty column for routine output: formats copied from `fmt_col` (header
+    style and number format, header row to last_row), then the header written.
 
     Refuses if anything is already in the column: a header row that ends early does not
     prove the column is empty below it.
@@ -798,15 +868,16 @@ def create_run_rate_column(sh, ws, col, last_row):
     if col > ws.col_count:
         ws.add_cols(col - ws.col_count)
     elif any(str(v).strip() for v in ws.col_values(col)):
-        raise RuntimeError(f"Pacing Curve column {gspread.utils.rowcol_to_a1(1, col)[:-1]} is "
-                           f"past the last header but not empty; add a '{CURVE_RR_HEADER}' "
-                           f"header where the projection should go")
+        raise RuntimeError(f"{ws.title} column {gspread.utils.rowcol_to_a1(1, col)[:-1]} is past "
+                           f"the last header but not empty; add a '{header}' header where "
+                           f"this should go")
     sh.batch_update({"requests": [{"copyPaste": {
-        "source":      {"sheetId": ws.id, "startRowIndex": CURVE_HEADER_ROW - 1, "endRowIndex": last_row,
-                        "startColumnIndex": col - 2, "endColumnIndex": col - 1},
-        "destination": {"sheetId": ws.id, "startRowIndex": CURVE_HEADER_ROW - 1, "endRowIndex": last_row,
+        "source":      {"sheetId": ws.id, "startRowIndex": header_row - 1, "endRowIndex": last_row,
+                        "startColumnIndex": fmt_col - 1, "endColumnIndex": fmt_col},
+        "destination": {"sheetId": ws.id, "startRowIndex": header_row - 1, "endRowIndex": last_row,
                         "startColumnIndex": col - 1, "endColumnIndex": col},
         "pasteType": "PASTE_FORMAT"}}]})
+    ws.update_cell(header_row, col, header)
 
 def stamp_lastrun(cfg):
     r=_find_label_row(cfg,"Last routine run")
@@ -1121,6 +1192,7 @@ def main():
     data=pull_platform_mtd_and_l30()
     budgets, budget_failed = pull_daily_budgets()
     statuses, status_failed = pull_campaign_status()
+    recent, recent_failed = pull_recent_campaign_spend()   # per-campaign run rate -> col Q
     daily_spend=pull_google_daily_spend()      # Google only -> lag gross-up
     daily_all=pull_daily_spend_all_platforms() # all platforms -> pacing curve series
 
@@ -1149,6 +1221,7 @@ def main():
     cells=[]
     matched=[]; zeroed=[]
     budget_set=[]; budget_approx=[]; budget_kept=[]
+    rr_rows=[]       # (name, key, MTD) for every row whose MTD cell is written this run
     for name,wrow in row_for.items():
         if name in skipped:
             continue
@@ -1163,6 +1236,7 @@ def main():
         else:
             continue
         cells.append(gspread.Cell(wrow,COL["mtd"],   round(d["mtd_spend"],2)))
+        rr_rows.append((name, key, d["mtd_spend"]))
         cells.append(gspread.Cell(wrow,COL["l30sp"], round(d["l30_spend"],2)))
         cells.append(gspread.Cell(wrow,COL["l30cv"], round(d["l30_cv"],2)))
         # Daily budget: the platform's configured budget when there is one to read.
@@ -1240,6 +1314,43 @@ def main():
     # What the queues filter on: this run's value where there is one, else the sheet's.
     status_now = {**status_prev, **status_new}
 
+    # Per-campaign run-rate inputs. The Sheet's Projected EOM (col Q) is
+    #   MTD thru yesterday + run rate x days left incl. today
+    # the same basis as the digest's account projection, so the campaign rows add up to
+    # roughly the headline instead of contradicting it. Q falls back to the old straight
+    # line on a row where these cells are blank. Written apart from the spend cells so a
+    # problem here cannot stop the spend refresh.
+    rr_in = run_rate_inputs(rr_rows, recent, recent_failed)
+    rr_tracker_error = None
+    days_left = calendar.monthrange(TODAY.year, TODAY.month)[1] - TODAY.day + 1
+    rr_sum = sum(t + r * days_left for t, r in rr_in.values())
+    print(f"[runrate] {len(rr_in)} rows: MTD thru yesterday + {RUN_RATE_DAYS}-day rate; "
+          f"per-campaign projections sum to ${rr_sum:,.0f}"
+          + (f"  (recent pull failed: {', '.join(recent_failed)}; those rows left as is)"
+             if recent_failed else "")
+          + ("  (DRY RUN, not sent)" if DRY_RUN else ""))
+    if rr_in and not DRY_RUN:
+        try:
+            hdr_row = DATA_START_ROW - 1
+            rr_cols = {}
+            for needle, header in (("thru yesterday", TRACKER_THRU_Y_HEADER),
+                                   ("run rate", TRACKER_RATE_HEADER)):
+                c, exists = find_header_column(tracker, hdr_row, needle)
+                if not exists:
+                    # Currency format and header style from MTD Spend (col E).
+                    claim_column(sh, tracker, c, hdr_row, LAST_ROW, header, COL["mtd"])
+                rr_cols[needle] = c
+            rr_out = [gspread.Cell(hdr_row, rr_cols["run rate"], TRACKER_RATE_HEADER)]
+            for n, (thru, rate) in rr_in.items():
+                rr_out.append(gspread.Cell(row_for[n], rr_cols["thru yesterday"], round(thru, 2)))
+                rr_out.append(gspread.Cell(row_for[n], rr_cols["run rate"], round(rate, 2)))
+            tracker.update_cells(rr_out, value_input_option="USER_ENTERED")
+            print(f"[write] {len(rr_out)-1} cells -> Pacing Tracker run-rate inputs "
+                  f"({'/'.join(gspread.utils.rowcol_to_a1(1, c)[:-1] for c in rr_cols.values())})")
+        except Exception as e:
+            rr_tracker_error = str(e)
+            print(f"  [!] run-rate inputs not written to Pacing Tracker: {e}")
+
     if not DRY_RUN: write_multiplier(cfg,mult)
 
     total_mtd=sum(d["mtd_spend"] for d in data.values())
@@ -1290,22 +1401,24 @@ def main():
     for d in proj["missing"]:
         print(f"  [!] no daily spend for {d} - counted as $0 in the run rate")
     rr_write_error = None
-    rr_col, rr_exists = find_run_rate_column(curve_ws)
+    rr_col, rr_exists = find_header_column(curve_ws, CURVE_HEADER_ROW, "run rate")
     rr_a1 = gspread.utils.rowcol_to_a1(1, rr_col)[:-1]
     if not DRY_RUN:
         try:
             last = proj["days_in_month"] + 2
             if not rr_exists:
-                create_run_rate_column(sh, curve_ws, rr_col, last)
+                # Formatted like the Sheet's own Projected column to its left.
+                claim_column(sh, curve_ws, rr_col, CURVE_HEADER_ROW, last, CURVE_RR_HEADER, rr_col - 1)
             curve_ws.update_cells(
                 [gspread.Cell(CURVE_HEADER_ROW, rr_col, CURVE_RR_HEADER)]
-                + [gspread.Cell(n + 2, rr_col, v) for n, v in proj["path"].items()],
+                + [gspread.Cell(n + 2, rr_col, proj["path"].get(n, ""))   # blank past month end
+                   for n in range(1, CURVE_DAYS + 1)],
                 value_input_option="USER_ENTERED")
         except Exception as e:
             rr_write_error = str(e)
             print(f"  [!] run-rate projection not written to Pacing Curve: {e}")
     if not rr_write_error:
-        print(f"[write] Pacing Curve {rr_a1}3:{rr_a1}{proj['days_in_month']+2} - run-rate path, "
+        print(f"[write] Pacing Curve {rr_a1}3:{rr_a1}{CURVE_DAYS+2} - run-rate path, "
               f"day {max(TODAY.day-1, 1)} to {proj['days_in_month']}"
               + ("" if rr_exists else f" (no run-rate header yet - "
                  + ("would be created" if DRY_RUN else "created") + ")")
@@ -1424,6 +1537,11 @@ def main():
                        f"so the run rate and projected EOM read low.")
         if rr_write_error:
             out.append(":warning: Run-rate projection could not be written to Pacing Curve this run.")
+        if recent_failed:
+            out.append(f":warning: Recent-spend pull failed for {', '.join(recent_failed)}; those rows' "
+                       f"Projected EOM is computed from the previous run's inputs.")
+        if rr_tracker_error:
+            out.append(":warning: Per-campaign run-rate inputs could not be written this run.")
         if status_changes:
             shown = "; ".join(f"{n[:40].rstrip()} {old} \u2192 {new}" for n, old, new in status_changes[:4])
             more = f" +{len(status_changes)-4} more" if len(status_changes) > 4 else ""

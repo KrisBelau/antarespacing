@@ -23,10 +23,11 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 |---|---|
 | `Pacing Tracker` | **E** MTD spend, **G** L30D spend, **H** L30D conv value (per campaign row; $0 when the campaign has no Windsor data) |
 | `Pacing Tracker` | **F** daily budget — read from each platform's configured budget (Google/Microsoft `budget_amount`, Meta campaign or ad-set daily budget, Reddit daily ad-group or campaign budget), latest of the last three days. No daily budget to read: Meta/Reddit fall back to L30D ÷ 30, Google/Microsoft are left as is |
+| `Pacing Tracker` | **MTD thru Yesterday ($)** and **Run Rate, 7d ($/day)** (found by header; **AA**/**AB**): per-campaign inputs to Projected EOM (Q). See [Per-campaign Projected EOM](#per-campaign-projected-eom) |
 | `Pacing Tracker` | **Platform Status** (column found by header; created at **Z** on first run) — each campaign's on-platform status, every row, every run. See [Platform Status](#platform-status) |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
-| `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
+| `Pacing Curve` | **D3:D33** cumulative through today; later days, and days past the month's end, blanked |
 | `Pacing Curve` | **Projected, 7-day run rate ($)** (column found by header; created at **F** on first run) — projected cumulative spend from yesterday to month end. See [Month-end spend projection](#month-end-spend-projection) |
 | `iROAS Daily` | whole tab, rewritten each run |
 
@@ -131,6 +132,31 @@ spend — on every day from the 2nd onward, because of the trailing-30d window b
 August total was **\$154,495 against the \$140,000 guardrail (10.4% over)**, not the
 \$140,837 the sheet displayed.
 
+**2026-11-16 — projections moved to the run rate and off the partial day.** Applied by
+script with the service account; every formula was checked against the expected old
+text before it was replaced. To roll back, put the old formulas below back.
+
+- `Pacing Curve` **E3:E33** (header renamed **Projected, straight line ($)**). Was, for
+  day *n*: `=IF(n>=Config!$C$12*Config!$C$15,'Pacing Tracker'!$E$70/(Config!$C$12*Config!$C$15)*n,NA())`,
+  which divided campaign-level MTD, today's partial day included, by days elapsed
+  including today. Now
+  `=IF(AND(Config!$C$14>1,n>=Config!$C$14-1,n<=Config!$C$12),INDEX($D$3:$D$33,Config!$C$14-1)/(Config!$C$14-1)*n,NA())`:
+  actual cumulative through yesterday from column D, over complete days, so it starts on
+  the actual line. Blank on day 1, where there is no complete day.
+- `Pacing Curve` **F**: new, **Projected, 7-day run rate ($)**, written by the routine.
+  Added to the chart as a solid orange series; the straight line stays dotted.
+- `Pacing Curve` **D33** held October 31's cumulative ($213,396) as a stray point at day 31,
+  because the routine only wrote rows up to the month's last day. Blanked, and the
+  routine now writes all 31 rows.
+- `Pacing Tracker` **Q3:Q59** (Projected EOM). Was `=IFERROR(E{r}/Config!$C$15,0)`. Now
+  `=IF(OR(ISBLANK($AA{r}),ISBLANK($AB{r})),IFERROR(E{r}/Config!$C$15,0),$AA{r}+$AB{r}*(Config!$C$12-Config!$C$14+1))`.
+- `Pacing Tracker` **AA**/**AB**: new, routine-written inputs to Q.
+
+Checked after the write: no error cells on either tab; Q sums to $321,695 against
+$323,234 for the account, the gap being the AT2026 Demand Gen Prospecting CAN campaign,
+which has no tracker row ($842 through yesterday + $47/day x 15). Nothing in the Sheet
+reads O, P or Q, so no other figure moved.
+
 ## Month-end spend projection
 
 The digest's projected month-end spend, its guardrail comparison and the $0-revenue
@@ -168,8 +194,8 @@ judgment call the projection cannot make.
 containing "run rate" (created at F, formatted like column E, on the first run). It
 holds actual cumulative spend through yesterday as the anchor, so the line joins the
 actual curve, then the projection to month end; earlier days are blank. Same date-level
-series as Actual Cumulative, so the two meet exactly. **The chart does not plot it until
-the column is added as a series.**
+series as Actual Cumulative, so the two meet exactly. The chart plots it next to the
+straight line (E), which now starts from the same point.
 
 ### What the backtest says
 
@@ -223,9 +249,27 @@ A version that could work: current budget for capped campaigns, run rate for the
 Testing it needs budget history, which would have to be logged from each run going
 forward.
 
-Not changed, still straight line with the partial-day bias: the Sheet's own Pacing Curve
-**Projected ($)** column (E) and Pacing Tracker **Projected EOM** (Q) per campaign. Both
-are Sheet formulas.
+### Per-campaign Projected EOM
+
+Pacing Tracker **Projected EOM** (Q) is on the same basis as the headline:
+
+```
+Q = MTD thru Yesterday (AA) + Run Rate, 7d (AB) x days left incl. today
+```
+
+The routine writes AA and AB each run from four `:recent` pulls (campaign x date, today
+minus 7 through today): AA is the row's MTD less today's spend, AB the average over the 7
+complete days. Q falls back to the old straight line on a row where AA or AB is blank:
+the Microsoft rows, whose pulls are empty, and a row just added with
+`add_tracker_rows.py` until the next run. A failed `:recent` pull leaves that platform's
+AA/AB as they were and says so in the digest.
+
+The rows add up to the headline less any campaign with no tracker row: on 2026-11-16,
+$321,695 against $323,234.
+
+Still on the partial day: **Expected MTD** (O) is daily budget x days elapsed including
+today, so **Pacing %** (P) reads low every morning by the unfinished share of today.
+Nothing reads either column.
 
 ## Digest queue ordering
 
@@ -506,6 +550,10 @@ A failed status pull leaves that platform's cells as they were and says so in th
 It never stops the run.
 
 ## Known gaps
+
+- **Pacing % (col P) counts today as a full day.** See
+  [Per-campaign Projected EOM](#per-campaign-projected-eom). Fixing it means switching O
+  and P to MTD thru Yesterday (AA) and complete days.
 
 - **Daily budget (column F) follows the platform from 2026-11-04.** Before that, Google
   and Microsoft budgets were entered by hand and drifted (2026-10-30: the video row said
