@@ -205,6 +205,24 @@ How to read it:
   from day 8 on. The two usually miss in the same direction, so they do not bracket the
   outcome.
 
+### Why not project from configured budgets
+
+Checked 2026-11-16 and ruled out for now. Two reasons:
+
+- **No history to test it against.** Windsor's Google `budget_amount` by date is the
+  current budget repeated on every date. Several campaigns cut on Nov 10 read their
+  post-cut budget on Nov 8–9, including one that spent $3,991 against a "$1,000" budget,
+  past Google's 2x daily cap. Google's change history (`change_event`, 30 days) is not
+  on Sceptergraph's GAQL allowlist.
+- **Budgets here are ceilings, mostly unspent.** On Nov 11 Google budgets totalled
+  $14,646/day against $7,062 of spend (48%). Ten under-budget campaigns held $11,404 of
+  budget and spent $3,155. Budget x days left would have put November ~$80k too high,
+  and a budget change only moves spend on capped campaigns (27 of 37, 55% of spend).
+
+A version that could work: current budget for capped campaigns, run rate for the rest.
+Testing it needs budget history, which would have to be logged from each run going
+forward.
+
 Not changed, still straight line with the partial-day bias: the Sheet's own Pacing Curve
 **Projected ($)** column (E) and Pacing Tracker **Projected EOM** (Q) per campaign. Both
 are Sheet formulas.

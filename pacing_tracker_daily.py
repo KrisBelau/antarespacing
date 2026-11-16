@@ -80,8 +80,12 @@ DERIVED_DAILY = {"Meta Ads", "Reddit Ads"}
 
 # (connector, fields, how to read a daily budget in account currency from the rows)
 # Verified live 2026-11-04 against get_fields and get_data:
-#   google_ads budget_amount   - the campaign's daily budget on each date, major units.
-#                                Without `date` it sums across days, so date is required.
+#   google_ads budget_amount   - daily budget, major units. Without `date` it sums across
+#                                days, so date is required. It is the CURRENT budget
+#                                repeated on every date, not that day's budget (2026-11-16:
+#                                a campaign cut on Nov 10 reads $1,000 on Nov 9, when it
+#                                spent $3,991 - past Google's 2x daily cap). The latest
+#                                date is today's budget either way; no history exists here.
 #   bing       budget_amount   - current daily cap, major units
 #   facebook   campaign_daily_budget (CBO) / adset_daily_budget (ABO) - MINOR units (cents)
 #   reddit     ad_group_budget with ad_group_goal_type DAILY_SPEND, major units; or
