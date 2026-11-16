@@ -23,10 +23,12 @@ See `.claude/commands/antares-pacing-refresh.md` for the orchestration steps.
 |---|---|
 | `Pacing Tracker` | **E** MTD spend, **G** L30D spend, **H** L30D conv value (per campaign row; $0 when the campaign has no Windsor data) |
 | `Pacing Tracker` | **F** daily budget — read from each platform's configured budget (Google/Microsoft `budget_amount`, Meta campaign or ad-set daily budget, Reddit daily ad-group or campaign budget), latest of the last three days. No daily budget to read: Meta/Reddit fall back to L30D ÷ 30, Google/Microsoft are left as is |
+| `Pacing Tracker` | **MTD thru Yesterday ($)** and **Run Rate, 7d ($/day)** (found by header; **AA**/**AB**): per-campaign inputs to Projected EOM (Q). See [Per-campaign Projected EOM](#per-campaign-projected-eom) |
 | `Pacing Tracker` | **Platform Status** (column found by header; created at **Z** on first run) — each campaign's on-platform status, every row, every run. See [Platform Status](#platform-status) |
 | `Config` | **C65** spend-weighted lag gross-up |
 | `Config` | **C77** last-run timestamp |
-| `Pacing Curve` | **D3:D**(last day of month) cumulative through today; later days blanked |
+| `Pacing Curve` | **D3:D33** cumulative through today; later days, and days past the month's end, blanked |
+| `Pacing Curve` | **Projected, 7-day run rate ($)** (column found by header; created at **F** on first run) — projected cumulative spend from yesterday to month end. See [Month-end spend projection](#month-end-spend-projection) |
 | `iROAS Daily` | whole tab, rewritten each run |
 
 Nothing else is touched.
@@ -48,6 +50,7 @@ Nothing else is touched.
 | `PACING_DRY_RUN` | `1` to skip all writes and the Slack post |
 | `PACING_ALLOW_MONTH_MISMATCH` | `1` to bypass the month-rollover guard. See below |
 | `PACING_COVERAGE_MIN` | Share of MTD spend that must land on a tracker row before the digest warns. Default `0.98` |
+| `PACING_RUN_RATE_DAYS` | Complete days averaged for the month-end spend projection. Default `7`, range 1–29 |
 
 With neither `SLACK_OUT` nor `SLACK_BOT_TOKEN` set, the digest prints to stdout and is
 **not** posted — a misconfigured run stays silent rather than posting somewhere
@@ -128,6 +131,145 @@ Windsor daily spend rather than copied: the live tab was understated by \$7,122 
 spend — on every day from the 2nd onward, because of the trailing-30d window bug. Real
 August total was **\$154,495 against the \$140,000 guardrail (10.4% over)**, not the
 \$140,837 the sheet displayed.
+
+**2026-11-16 — projections moved to the run rate and off the partial day.** Applied by
+script with the service account; every formula was checked against the expected old
+text before it was replaced. To roll back, put the old formulas below back.
+
+- `Pacing Curve` **E3:E33** (header renamed **Projected, straight line ($)**). Was, for
+  day *n*: `=IF(n>=Config!$C$12*Config!$C$15,'Pacing Tracker'!$E$70/(Config!$C$12*Config!$C$15)*n,NA())`,
+  which divided campaign-level MTD, today's partial day included, by days elapsed
+  including today. Now
+  `=IF(AND(Config!$C$14>1,n>=Config!$C$14-1,n<=Config!$C$12),INDEX($D$3:$D$33,Config!$C$14-1)/(Config!$C$14-1)*n,NA())`:
+  actual cumulative through yesterday from column D, over complete days, so it starts on
+  the actual line. Blank on day 1, where there is no complete day.
+- `Pacing Curve` **F**: new, **Projected, 7-day run rate ($)**, written by the routine.
+  Added to the chart as a solid orange series; the straight line stays dotted.
+- `Pacing Curve` **D33** held October 31's cumulative ($213,396) as a stray point at day 31,
+  because the routine only wrote rows up to the month's last day. Blanked, and the
+  routine now writes all 31 rows.
+- `Pacing Tracker` **Q3:Q59** (Projected EOM). Was `=IFERROR(E{r}/Config!$C$15,0)`. Now
+  `=IF(OR(ISBLANK($AA{r}),ISBLANK($AB{r})),IFERROR(E{r}/Config!$C$15,0),$AA{r}+$AB{r}*(Config!$C$12-Config!$C$14+1))`.
+- `Pacing Tracker` **AA**/**AB**: new, routine-written inputs to Q.
+
+Checked after the write: no error cells on either tab; Q sums to $321,695 against
+$323,234 for the account, the gap being the AT2026 Demand Gen Prospecting CAN campaign,
+which has no tracker row ($842 through yesterday + $47/day x 15). Nothing in the Sheet
+reads O, P or Q, so no other figure moved.
+
+## Month-end spend projection
+
+The digest's projected month-end spend, its guardrail comparison and the $0-revenue
+headroom all use the trailing run rate (from 2026-11-16):
+
+```
+EOM = spend through yesterday + (average daily spend, last 7 complete days) x days left incl. today
+```
+
+It replaced a straight line, `MTD / days elapsed x days in month`, which had two problems:
+
+- It averaged the whole month, so a budget change kept projecting at the old pace for
+  the rest of the month. On 2026-11-16 spend had stepped down from ~$14k to ~$8.6k a day
+  on Nov 10; the straight line said $367,708 and the 7-day rate $323,234.
+- It counted today's partial day as a full day. Days elapsed includes today
+  (`Expected MTD` = daily budget x 16 on Nov 16), but at the 13:00 UTC run only ~20% of
+  the day has booked. So it read low every morning: about 40% low on the 2nd, still ~5%
+  low mid-month. Day 1 was meaningless.
+
+The run rate excludes today from both the anchor and the rate, and its window runs back
+across the month boundary, so day 1 projects at last month's closing rate.
+
+The digest shows the rate next to the month-to-date average and the straight line it
+replaced (on complete days, so the partial-day error is gone from that too):
+
+```
+Projected EOM spend (7-day run rate): $323,234  (over the $X guardrail by N%)
+   $9,292/day over Nov 9–Nov 15 vs $12,257/day month to date; straight line $367,708
+```
+
+A wide gap between the two means spend has changed pace. Whether the change lasts is the
+judgment call the projection cannot make.
+
+**Pacing Curve** gets the projected path in its own column, found by any header
+containing "run rate" (created at F, formatted like column E, on the first run). It
+holds actual cumulative spend through yesterday as the anchor, so the line joins the
+actual curve, then the projection to month end; earlier days are blank. Same date-level
+series as Actual Cumulative, so the two meet exactly. The chart plots it next to the
+straight line (E), which now starts from the same point.
+
+### What the backtest says
+
+Replayed against daily spend for May–Oct 2026 (Windsor, all four platforms): a morning run
+on every day of each month, scored against that month's actual total. Mean absolute error:
+
+| Run on day | Straight line, as built | Straight line, complete days | Rolling 7-day | Rolling 14-day |
+|---|---:|---:|---:|---:|
+| 1–7 (n=35) | 38.8% | 25.6% | 20.1% | 20.5% |
+| 8–14 (n=35) | 10.6% | 12.6% | 18.9% | 11.5% |
+| 15–21 (n=42) | 11.5% | 11.5% | 16.2% | 13.2% |
+| 22–EOM (n=58) | 6.5% | 5.3% | 4.7% | 5.8% |
+| All | 15.2% | 12.1% | 13.6% | 11.9% |
+
+May days 1–14 are left out of every column (no April data for the lookback). "As built"
+assumes 20% of today booked at run time.
+
+How to read it:
+
+- **The 7-day rate is not better everywhere.** It wins the first week and the last ten
+  days, and loses mid-month by 4–6 points. It reacts fast, which helps when a change
+  sticks (a budget cut) and hurts when it does not (a promo burst that ends): Jul 7–9,
+  Sep 6–16 and Oct 27–Nov 9 were all bursts, and a 7-day window projects each one
+  forward for weeks after it ends.
+- The partial-day fix accounts for much of the gain over the old number: the straight
+  line on complete days alone goes from 15.2% to 12.1%.
+- 14 days scored best overall, but 11.9% against 12.1% on six months is within noise.
+  `PACING_RUN_RATE_DAYS=14` switches it if the team prefers a slower line.
+- No trailing method predicts a planned surge. All four ran 13–17% low on average across
+  October's runs from day 8, because none of them could see the Oct 27–31 burst coming.
+  Expect the same for BFCM: in late November, read the projection as a floor.
+- The actual landed between the straight line and the 7-day rate on only 16% of runs
+  from day 8 on. The two usually miss in the same direction, so they do not bracket the
+  outcome.
+
+### Why not project from configured budgets
+
+Checked 2026-11-16 and ruled out for now. Two reasons:
+
+- **No history to test it against.** Windsor's Google `budget_amount` by date is the
+  current budget repeated on every date. Several campaigns cut on Nov 10 read their
+  post-cut budget on Nov 8–9, including one that spent $3,991 against a "$1,000" budget,
+  past Google's 2x daily cap. Google's change history (`change_event`, 30 days) is not
+  on Sceptergraph's GAQL allowlist.
+- **Budgets here are ceilings, mostly unspent.** On Nov 11 Google budgets totalled
+  $14,646/day against $7,062 of spend (48%). Ten under-budget campaigns held $11,404 of
+  budget and spent $3,155. Budget x days left would have put November ~$80k too high,
+  and a budget change only moves spend on capped campaigns (27 of 37, 55% of spend).
+
+A version that could work: current budget for capped campaigns, run rate for the rest.
+Testing it needs budget history, which would have to be logged from each run going
+forward.
+
+### Per-campaign Projected EOM
+
+Pacing Tracker **Projected EOM** (Q) is on the same basis as the headline:
+
+```
+Q = MTD thru Yesterday (AA) + Run Rate, 7d (AB) x days left incl. today
+```
+
+The routine writes AA and AB each run from four `:recent` pulls (campaign x date, today
+minus 7 through today): AA is the row's MTD less today's spend, AB the average over the 7
+complete days. Q falls back to the old straight line on a row where AA or AB is blank:
+the Microsoft rows, whose pulls are empty, and a row just added with
+`add_tracker_rows.py` until the next run. A failed `:recent` pull leaves that platform's
+AA/AB as they were and says so in the digest.
+
+The rows add up to the headline less any campaign with no tracker row: on 2026-11-16,
+$321,695 against $323,234.
+
+Still on the partial day: **Expected MTD** (O) is daily budget x days elapsed including
+today, so **Pacing %** (P) reads low every morning by the unfinished share of today.
+Nothing reads either column.
 
 ## Digest queue ordering
 
@@ -409,6 +551,10 @@ It never stops the run.
 
 ## Known gaps
 
+- **Pacing % (col P) counts today as a full day.** See
+  [Per-campaign Projected EOM](#per-campaign-projected-eom). Fixing it means switching O
+  and P to MTD thru Yesterday (AA) and complete days.
+
 - **Daily budget (column F) follows the platform from 2026-11-04.** Before that, Google
   and Microsoft budgets were entered by hand and drifted (2026-10-30: the video row said
   $700/day against $450 in Google Ads), and Meta/Reddit were estimated as L30D ÷ 30. It
@@ -424,5 +570,7 @@ It never stops the run.
   ~1% higher, because they include spend not attributable to a currently-reported
   campaign row. Each run prints both and the drift; it only flags above 3%, which would
   mean something structural (a platform dropped out, a filter stopped matching) rather
-  than this known gap. Measured 2026-08-12: $61,181 vs $60,551.
+  than this known gap. Measured 2026-08-12: $61,181 vs $60,551. The month-end
+  projection is on the date-level basis, so it runs ~1% above `Total MTD spend` plus the
+  run rate on the campaign basis.
 - **`total_mtd`** sums every campaign Windsor returns, including any with no sheet row.
